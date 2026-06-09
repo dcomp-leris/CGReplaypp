@@ -122,6 +122,14 @@ cd scream/gstscream
 
 This builds **SCReAM v2** (`ScreamV2Tx`), the algorithm in draft `rfc8298bis-screamv2`.
 
+Then drop in the CGReplay++ pipeline scripts (appsrc input, encoder-aware,
+tuned SCReAM rate band — see `scream-scripts/README.md`):
+
+```bash
+cp scream-scripts/sender.sh scream-scripts/receiver.sh \
+   scream/gstscream/scripts/
+```
+
 ### 7. RoQ (optional, in progress)
 
 ```bash
