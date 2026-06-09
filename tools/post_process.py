@@ -19,9 +19,11 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import glob
 import cv2
 import pandas as pd
 import yaml
+from pyzbar import pyzbar
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__)))
 from video_Quality import compare_images, mask_qr_with_ref, FFMPEG
@@ -102,6 +104,47 @@ def load_fps_rt(mode: str) -> pd.DataFrame:
     return df.sort_values("frame_id").reset_index(drop=True)
 
 
+def _decode_frame_id(path: str) -> int | None:
+    """Read the TRUE frame id from the QR burned into a received frame."""
+    img = cv2.imread(path)
+    if img is None:
+        return None
+    blurred = cv2.GaussianBlur(img, (5, 5), 0)
+    for q in pyzbar.decode(blurred):
+        for part in q.data.decode("utf-8", "ignore").split(","):
+            if "Frame ID" in part:
+                try:
+                    return int(part.split(":")[1].strip())
+                except (IndexError, ValueError):
+                    pass
+    return None
+
+
+def realign_by_qr(tgt_folder: str) -> str:
+    """RTP/SCReAM save received frames by ARRIVAL COUNTER, not by true frame id,
+    so any loss or reorder shifts every subsequent file out of alignment with the
+    reference (e.g. saved 0011.png actually holds frame 26). Each received frame
+    carries its true id in the burned-in QR; remap by decoding it into a temp dir
+    of {true_id:04d}.png (last writer wins on duplicate retries). Falls back to the
+    filename number when a QR can't be read. Without this, SSIM/PSNR/VMAF compare
+    mismatched frames and collapse toward zero."""
+    out = tempfile.mkdtemp(prefix="aligned_")
+    n_qr = n_fallback = 0
+    for p in sorted(glob.glob(os.path.join(tgt_folder, "*.png"))):
+        fid = _decode_frame_id(p)
+        if fid is not None:
+            n_qr += 1
+        else:
+            try:
+                fid = int(os.path.splitext(os.path.basename(p))[0])
+            except ValueError:
+                continue
+            n_fallback += 1
+        shutil.copy(p, os.path.join(out, f"{fid:04d}.png"))
+    print(f"  Realigned by QR: {n_qr} frames by true id, {n_fallback} by filename fallback")
+    return out
+
+
 def compute_vmaf_sequence(tgt_folder: str, frame_ids: list[int]) -> dict:
     """Per-frame VMAF via a single libvmaf pass over the matched sequence.
 
@@ -115,9 +158,14 @@ def compute_vmaf_sequence(tgt_folder: str, frame_ids: list[int]) -> dict:
     if not frame_ids:
         return {}
 
-    ref_dir  = tempfile.mkdtemp(prefix="vmaf_ref_")
-    dist_dir = tempfile.mkdtemp(prefix="vmaf_dist_")
-    log_path = os.path.join(tempfile.gettempdir(), "vmaf_seq.json")
+    # Unique per-run temp dir for ALL intermediates. Fixed /tmp paths broke when a
+    # root (sudo Mininet) run left root-owned /tmp/vmaf_*.mp4/.json behind: a later
+    # user run could not overwrite them, ffmpeg failed silently, and libvmaf read
+    # the STALE json -> wrong (pre-realignment) VMAF. Unique paths avoid that.
+    work     = tempfile.mkdtemp(prefix="vmaf_work_")
+    ref_dir  = os.path.join(work, "ref");  os.makedirs(ref_dir)
+    dist_dir = os.path.join(work, "dist"); os.makedirs(dist_dir)
+    log_path = os.path.join(work, "vmaf_seq.json")
     index_to_fid = {}
     try:
         seq = 0
@@ -137,8 +185,8 @@ def compute_vmaf_sequence(tgt_folder: str, frame_ids: list[int]) -> dict:
         if seq == 0:
             return {}
 
-        ref_mp4  = os.path.join(tempfile.gettempdir(), "vmaf_ref.mp4")
-        dist_mp4 = os.path.join(tempfile.gettempdir(), "vmaf_dist.mp4")
+        ref_mp4  = os.path.join(work, "vmaf_ref.mp4")
+        dist_mp4 = os.path.join(work, "vmaf_dist.mp4")
         for src, out in [(ref_dir, ref_mp4), (dist_dir, dist_mp4)]:
             subprocess.run(
                 [FFMPEG, "-y", "-framerate", str(FPS_TARGET),
@@ -164,8 +212,7 @@ def compute_vmaf_sequence(tgt_folder: str, frame_ids: list[int]) -> dict:
                 result[index_to_fid[idx]] = vmaf
         return result
     finally:
-        shutil.rmtree(ref_dir, ignore_errors=True)
-        shutil.rmtree(dist_dir, ignore_errors=True)
+        shutil.rmtree(work, ignore_errors=True)
 
 
 def compute_metrics(mode: str):
@@ -178,6 +225,14 @@ def compute_metrics(mode: str):
     tgt_mode = os.path.join("player", f"received_frames_{mode}")
     tgt_fallback = os.path.join("player", "received_frames")
     tgt_folder = tgt_mode if os.path.isdir(tgt_mode) else tgt_fallback
+
+    # RTP/SCReAM name received frames by arrival counter, so realign them to
+    # their true ids (from the QR) before comparing. QUIC already saves by the
+    # header frame id, so it stays as-is.
+    aligned_tmp = None
+    if mode in ("rtp", "scream"):
+        aligned_tmp = realign_by_qr(tgt_folder)
+        tgt_folder = aligned_tmp
 
     # Step 1 — per-frame video quality (SSIM, PSNR)
     print(f"  Computing SSIM/PSNR on frames 1..{STOP_FRAME-1} (frames dir: {tgt_folder}) ...")
@@ -224,6 +279,9 @@ def compute_metrics(mode: str):
     print(f"  Avg SSIM={out['SSIM'].mean():.4f}  "
           f"Avg RT={out['response_time_ms'].mean():.1f}ms  "
           f"Avg QoE={out['QoE'].mean():.4f}")
+
+    if aligned_tmp:
+        shutil.rmtree(aligned_tmp, ignore_errors=True)
 
 
 if __name__ == "__main__":
