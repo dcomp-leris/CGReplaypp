@@ -1,0 +1,116 @@
+# CGReplay Configuration File
+# ---------------------------------------------------------------------------------------#
+# CG server configuration
+server:
+    server_IP: "10.0.0.1"                # Server computer IP address
+    server_port: 5000                    # UDP Port for receiving control (Joystick) commands from player
+    server_command_port: 5001            # not used yet!
+    server_interface: "server-eth0"      # Not Mandatory!
+    socket_timeout: 0.0001
+    ##CGServerLog
+    log_rate_control: "./logs/srv_codec_bitrate.csv"
+    log_server: "./logs/srv_QoEMetrics.csv"  # main log(frame_id,received_fame_id,my_gap,received_time,send_time,current_srv_fps,received_fps,current_cps,received_cps,current_srv_fps/received_fps,received_cps/current_cps,bitrate)
+    log_frame: "./logs/srv_frame.csv" # frame_id,current_srv_fps,processing_time,bitrate
+# ---------------------------------------------------------------------------------------#
+# CG  player configuration
+gamer:
+    player_IP: "10.0.0.2"                 # CG Gamer (or player) IP address
+    player_streaming_port: 5002           # UDP port for streaming (receiving) the frames of the video games!
+    player_command_port: 5003             # UDP Port for is binded in the server and used to send the command in the gamer system!
+    player_interface:  "player-eth0"      # Gamer interface name!
+    ## CG Player Log CGReplay/player/logs (rate/time logs + video frames in png)
+    player_rate_log: "./logs/ratelog_CG.csv"
+    player_time_log: "./logs/responsetime_CG.csv"
+    player_frame_log: "./logs/ply_frame.csv"
+    received_frames: "./received_frames"
+    pcap_file: "./output.pcap"   # Final PCAP location under CGReplay/player/ (Mininet will use /tmp internally and then copy here)
+
+# ---------------------------------------------------------------------------------------#
+# Game Data Setup 
+Forza:  # possible values: Fortnite  or  Kombat
+    name: "H.264"
+    sync_file: "./syncs/sync_forza.txt"
+    frames: "./Forza"
+
+Fortnite: 
+    name: "H.264"
+    sync_file: "./syncs/sync_fortnite.txt"
+    frames: "./Fortnite"
+
+Kombat: 
+    name: "H.264"
+    sync_file: "./syncs/sync_kombat.txt"
+    frames: "./Kombat"
+# ---------------------------------------------------------------------------------------#
+# Encoding setup 
+encoding:
+    name: "H.264"
+    H.264:
+        encoder: "x264enc"
+        parsing: "h264parse"
+        packetization: "rtph264pay"
+        decoder: "avdec_h264"
+        Depacketization: "rtph264depay"
+    H.265:
+        encoder: "x265enc"
+        parsing: "h265parse"
+        packetization: "rtph265pay"
+        decoder: "avdec_h265"
+        Depacketization: "rtph265depay"
+    fps: 30  # Frames per second
+    GOP: 3
+    resolution:
+        width: 1280 # 1280 #800 #600 # default 1364 server ==> # 1920
+        height: 720 #720  #720 #700 #400 # default 768  server ==? # 1080
+    starting_bitrate: 5000 # Kbps. Raised from 1400 so all-I-frame QUIC has enough bits per 720p frame (was starving each I-frame to ~5KB -> low VMAF).
+    bitrate_min: 2000
+    bitrate_max: 6000
+# ---------------------------------------------------------------------------------------#
+# Description: common Resolution
+    # 1920×1080 (Full HD, 1080p)
+    # 1280×720 (HD, 720p)
+    # 2560×1440 (QHD, 1440p)
+    # 3840×2160 (4K, UHD)
+    # 1600×900 (HD+, sometimes used for performance)
+    # 1024×768 (legacy, rarely used for modern games)
+        
+        ## Note: Most popular for streaming
+    # 1920×1080 (best balance of quality and performance)
+    # 1280×720 (for lower bandwidth or older hardware)
+# ---------------------------------------------------------------------------------------#
+# Synchronization Sliding Window
+sync: 
+    window_min: 1 
+    window_max: 6 # by default 4
+    ack_freq: 10 # Send Ack after receiving 30 frames!
+    ## Automatically increase and decrease the encoding rate (in CG server) based on frame quality and retransmission!
+    jump: 0.2 #1 #0.4
+    rise: 0.1 # 0.3 #0.1
+    decrease: 0.3 #0.1
+    fall: 0.3 # 0.5 #0.2
+
+# ---------------------------------------------------------------------------------------#
+# CGReplay Running Setup
+Running:
+    game: "Kombat"     # Set it to start the CGReplay specific Game
+    live_watching: True
+    duration: 30   # in seconds
+    stop_frm_number: 120
+
+# ---------------------------------------------------------------------------------------#
+# ScreAM Setup
+protocols:
+    SCReAM: False # False = 0 / True = 1
+    sender: "../../scream/gstscream/scripts/sender.sh"
+    receiver: "../../scream/gstscream/scripts/receiver.sh"
+    # QUIC transport (used by quic_sender.py / quic_receiver.py)
+    QUIC: False
+    quic_port: 4433
+    quic_cert: "../../rtp_stream_creation/server.pem"
+    quic_key:  "../../rtp_stream_creation/server.key"
+
+capturing_options:
+    enable_pcap: True
+
+
+

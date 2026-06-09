@@ -1,0 +1,41 @@
+# --- Datasets (download separately, see README) ---
+server/Kombat/
+server/Forza/
+server/Fortnite/
+Sources/
+
+# --- Generated outputs ---
+player/logs/*
+server/logs/*
+!player/logs/.gitkeep
+!server/logs/.gitkeep
+player/received_frames/
+player/received_frames_*/
+*.pcap
+*.png
+*.csv
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# --- Node / web UI ---
+ui/frontend/node_modules/
+ui/backend/.venv/
+node_modules/
+dist/
+.vite/
+
+# --- Private / local ---
+SPEAKER_NOTES.md
+MEETING_PREP.md
+files.zip
+Screenshot*
+.claude/
+
+# --- OS ---
+.DS_Store
+Thumbs.db

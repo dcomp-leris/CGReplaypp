@@ -1,0 +1,54 @@
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg: #0d1117;
+  --bg2: #161b22;
+  --bg3: #21262d;
+  --fg: #e6edf3;
+  --fg2: #8b949e;
+  --fg3: #484f58;
+  --border: rgba(255,255,255,0.08);
+  --border2: rgba(255,255,255,0.14);
+  --accent: #388bfd;
+  --accent-bg: rgba(56,139,253,0.1);
+  --green: #3fb950;
+  --green-bg: rgba(63,185,80,0.1);
+  --amber: #d29922;
+  --amber-bg: rgba(210,153,34,0.1);
+  --red: #f85149;
+  --red-bg: rgba(248,81,73,0.1);
+  --mono: 'JetBrains Mono', monospace;
+  --sans: 'Syne', sans-serif;
+  --radius: 8px;
+  --radius-lg: 12px;
+}
+
+html { font-size: 14px; }
+body {
+  font-family: var(--sans);
+  background: var(--bg);
+  color: var(--fg);
+  min-height: 100vh;
+}
+
+::-webkit-scrollbar { width: 4px; height: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--fg3); border-radius: 2px; }
+
+input, select, button { font-family: var(--mono); }
+input[type=number], input[type=text], select {
+  background: var(--bg2);
+  border: 0.5px solid var(--border2);
+  border-radius: var(--radius);
+  color: var(--fg);
+  font-size: 12px;
+  height: 30px;
+  padding: 0 8px;
+  width: 100%;
+  transition: border-color 0.15s;
+}
+input:focus, select:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+select option { background: var(--bg2); }

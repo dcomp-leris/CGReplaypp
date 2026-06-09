@@ -1,0 +1,54 @@
+# CGReplay Configuration File
+# Edit these values to match your actual CGReplay installation
+
+# ── Server (H0) ────────────────────────────────────────────────────────────
+server:
+  server_IP: "10.0.0.1"
+  server_port: 5000           # UDP port for joystick commands from player
+  server_command_port: 5001
+  server_interface: "cgserver-eth0"
+
+# ── Player (H1) ────────────────────────────────────────────────────────────
+player:
+  player_IP: "10.0.0.2"
+  player_port: 6000
+  player_interface: "cgplayer-eth0"
+
+# ── Codec settings ─────────────────────────────────────────────────────────
+codec:
+  default: "h264"             # h264 | h265 | vp9
+  fps: 30
+  resolution: "640x480"       # 640x480 | 1280x720 | 1920x1080
+  bitrate_kbps: 2000
+
+# ── Transport ──────────────────────────────────────────────────────────────
+transport:
+  protocol: "webrtc"          # webrtc | quic | scream
+  port: 7000
+
+# ── Mininet topology ───────────────────────────────────────────────────────
+mininet:
+  topo_type: "linear"         # linear | tree | single
+  n_switches: 2
+
+# ── Network conditions (all links) ─────────────────────────────────────────
+network:
+  bw_mbps: 100
+  delay_ms: 20
+  jitter_ms: 5
+
+# ── Bottleneck (last link to player) ───────────────────────────────────────
+bottleneck:
+  bw_mbps: 10
+  pkt_loss_pct: 1.0
+
+# ── Game ───────────────────────────────────────────────────────────────────
+game:
+  name: "fortnite"            # fortnite | foraz | kombat
+  capture_dir: "./captures"
+  results_dir: "./results"
+
+# ── Simulation ─────────────────────────────────────────────────────────────
+simulation:
+  duration_sec: 30
+  warmup_sec: 2
