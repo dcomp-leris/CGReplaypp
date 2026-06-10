@@ -233,7 +233,8 @@ truth for both the post-processing pipeline and the dashboard.
 ## Citation
 
 ```
-Shirmarz, A., de Castro, A. G., Verdi, F. L., & Rothenberg, C. E. (2025).
+[1] Shirmarz, A., de Castro, A. G., Verdi, F. L., & Rothenberg, C. E. (2025).
 CGReplay: Capture and Replay of Cloud Gaming Traffic for QoE/QoS Assessment.
 arXiv preprint arXiv:2505.11973.
+
 ```
