@@ -1,7 +1,13 @@
-# CGReplay++
+# CGReplay++: Replaying Cloud Gaming Sessions to Evaluate UDP, QUIC, and SCReAM
 
 **Replaying cloud gaming sessions to evaluate transport protocols (UDP, QUIC, RoQ, SCReAM) under controlled network conditions.**
 
+**Note**: This demo paper was submitted to "34th ACM International Conference on Multimedia" and is under review.
+
+[![Conference](https://img.shields.io/badge/Demo-Presnetation-blue)](https://docs.google.com/presentation/d/1vZZdlMLaBve1d6VJK2y9-KNPEcyZjNuUikISQc4mf00/edit?usp=sharing)
+[![Conference](https://img.shields.io/badge/Demo-Video-yellow)](-)
+[![Conference](https://img.shields.io/badge/Demo-Paper-red)](-)
+---
 UFSCar LERIS Lab. CGReplay++ extends [CGReplay](https://github.com/dcomp-leris/CGReplay) with multiple transports, a quality-of-experience (QoE) measurement pipeline (VMAF, SSIM, PSNR, response time), and a web dashboard to configure, run, and compare experiments.
 
 CGReplay++ is not plain video streaming. The server streams recorded game frames to the player, and the player sends joystick commands back to the server. This interaction (commands and frames interleaved) is what makes it a faithful cloud gaming workload.
