@@ -12,6 +12,9 @@ UFSCar LERIS Lab. CGReplay++ extends [CGReplay](https://github.com/dcomp-leris/C
 
 CGReplay++ is not plain video streaming. The server streams recorded game frames to the player, and the player sends joystick commands back to the server. This interaction (commands and frames interleaved) is what makes it a faithful cloud gaming workload.
 
+<img width="686" height="521" alt="image" src="https://github.com/user-attachments/assets/930ac394-3f17-4b91-9b48-e338b4081d81" />
+
+
 ---
 
 ## Transports
