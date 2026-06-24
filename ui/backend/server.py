@@ -65,13 +65,24 @@ _PROTO_MAP = {
 }
 _CODEC_MAP = {"H.264": "h264", "H264": "h264", "H.265": "h265", "H265": "h265"}
 
+# UI label → dataset folder name. The UI shows "Mortal Kombat" but the folder
+# (and Running.game in config) is "Kombat".
+_GAME_MAP = {
+    "mortal kombat": "Kombat", "kombat": "Kombat",
+    "forza": "Forza", "fortnite": "Fortnite",
+}
+
 
 def _map_protocol(proto: str) -> Optional[str]:
     return _PROTO_MAP.get(proto, _PROTO_MAP.get(proto.split("(")[0].strip()))
 
 
-def _dataset_frame_count() -> int:
-    n = len(glob.glob(str(KOMBAT_DIR / "*.png")))
+def _map_game(game: str) -> str:
+    return _GAME_MAP.get(str(game).strip().lower(), "Kombat")
+
+
+def _dataset_frame_count(game: str = "Kombat") -> int:
+    n = len(glob.glob(str(CGREPLAY_DIR / "server" / game / "*.png")))
     return n if n > 0 else 120
 
 
@@ -106,6 +117,10 @@ async def run_real_experiment(cfg: dict):
     lines, then reads player/logs/metrics_<proto>.csv and emits one tick per
     frame with the real VMAF / SSIM / PSNR / response time.
     """
+    # NOTE: every UI selector below now flows to the real run via topology args
+    # (--res/--fps/--game/--jitter/--bn-bw added 2026-06-10). Topology applies
+    # them to config; all three transports read config. n_switches/topo_type
+    # still drive only the preview diagram, not the real single-bottleneck path.
     proto   = _map_protocol(cfg.get("proto", ""))
     codec   = cfg.get("codec", "H.264")
     encoder = _CODEC_MAP.get(codec)
@@ -121,23 +136,29 @@ async def run_real_experiment(cfg: dict):
         sim.running = False
         return
 
-    fps      = int(float(cfg.get("fps", 30)))
-    duration = int(float(cfg.get("duration", 4)))
-    bw       = float(cfg.get("bn_bw", cfg.get("bw", 10)))   # bottleneck is the constraint
-    delay    = float(cfg.get("delay", 10))
-    loss     = float(cfg.get("pkt_loss", 0))
+    fps       = int(float(cfg.get("fps", 30)))
+    duration  = int(float(cfg.get("duration", 4)))
+    access_bw = float(cfg.get("bw", 100))             # access-link rate (player side)
+    bn_bw     = float(cfg.get("bn_bw", access_bw))    # bottleneck = the constraint
+    delay     = float(cfg.get("delay", 10))
+    jitter    = float(cfg.get("jitter", 0))
+    loss      = float(cfg.get("pkt_loss", 0))
+    res       = str(cfg.get("res", "960x540")).replace("×", "x")
+    game      = _map_game(cfg.get("game", "Kombat"))
 
-    # Cap the run to the available dataset (Kombat has a fixed number of frames).
-    available = _dataset_frame_count()
+    # Cap the run to the available dataset (each game has a fixed frame count).
+    available = _dataset_frame_count(game)
     want      = duration * fps + 1
     frames    = min(want, available)
     if want > available:
         await broadcast({"type": "log", "level": "warn",
-                         "msg": f"> Dataset has {available} frames (~{available // fps}s); capping {duration}s run to {frames - 1} frames."})
+                         "msg": f"> {game} has {available} frames (~{available // fps}s); capping {duration}s run to {frames - 1} frames."})
 
     cmd = [SYS_PYTHON, str(TOPOLOGY), "--protocol", proto, "--encoder", encoder,
-           "--bw", str(bw), "--delay", f"{delay}ms", "--loss", str(loss),
-           "--frames", str(frames)]
+           "--bw", str(access_bw), "--bn-bw", str(bn_bw),
+           "--delay", f"{delay}ms", "--jitter", f"{jitter}ms",
+           "--loss", str(loss), "--res", res, "--fps", str(fps),
+           "--game", game, "--frames", str(frames)]
     if os.geteuid() != 0:
         await broadcast({"type": "log", "level": "warn",
                          "msg": "> Backend is not root; trying 'sudo -n'. If it fails, restart the backend with sudo."})
@@ -145,10 +166,9 @@ async def run_real_experiment(cfg: dict):
 
     await broadcast({"type": "log", "level": "info", "msg": f"$ {' '.join(cmd)}"})
     await broadcast({"type": "log", "level": "info",
-                     "msg": f"> Codec {codec} ({encoder}) | Protocol {cfg.get('proto')} ({proto}) | bottleneck {bw:g}Mbps {delay:g}ms {loss:g}% loss"})
-    if float(cfg.get("jitter", 0)):
-        await broadcast({"type": "log", "level": "warn",
-                         "msg": "> Note: jitter is not applied by the current topology (ignored)."})
+                     "msg": f"> {game} | Codec {codec} ({encoder}) | Protocol {cfg.get('proto')} ({proto}) | {res} @ {fps}fps"})
+    await broadcast({"type": "log", "level": "info",
+                     "msg": f"> Network: access {access_bw:g}Mbps, bottleneck {bn_bw:g}Mbps, {delay:g}ms delay, {jitter:g}ms jitter, {loss:g}% loss"})
     await broadcast({"type": "log", "level": "warn",
                      "msg": "> Launching real Mininet experiment — full stream + metrics, ~1 min..."})
 
@@ -443,24 +463,43 @@ async def status():
     return {"running": sim.running, "clients": len(sim.ws_clients)}
 
 
+# A complete PNG ends with the IEND chunk. The player writes frames with a
+# non-atomic cv2.imwrite, so the newest file is often half-written when the web
+# canvas polls it — a partial PNG renders as a white flash. Serve only complete
+# PNGs (newest first), falling back to the previous frame while one is mid-write.
+_PNG_IEND = b"\x49\x45\x4e\x44\xae\x42\x60\x82"
+
+def _read_if_complete(path: str) -> Optional[bytes]:
+    try:
+        with open(path, "rb") as fh:
+            data = fh.read()
+    except OSError:
+        return None
+    if len(data) > 8 and data[:8] == b"\x89PNG\r\n\x1a\n" and data.endswith(_PNG_IEND):
+        return data
+    return None
+
+
 @app.get("/api/frame")
 async def latest_frame():
-    """Serve the most-recent received game frame for the live web canvas.
+    """Serve the most-recent COMPLETE received game frame for the live canvas.
 
-    Reads the newest PNG in CGReplay/player/received_frames/, which the player
-    writes in real time during a run. 204 when there is nothing to show yet.
+    Reads PNGs in CGReplay/player/received_frames/, newest first, and returns
+    the first one that is fully written (valid PNG header + IEND trailer). This
+    skips the half-written newest file, so the canvas never shows a white flash.
+    204 when there is nothing complete to show yet.
     """
     try:
         pngs = glob.glob(str(RECV_DIR / "*.png"))
         if not pngs:
             return Response(status_code=204)
-        newest = max(pngs, key=os.path.getmtime)
-        with open(newest, "rb") as fh:
-            data = fh.read()
-        if not data:
-            return Response(status_code=204)
-        return Response(content=data, media_type="image/png",
-                        headers={"Cache-Control": "no-store"})
+        # Check the 4 newest by mtime; the very newest may still be mid-write.
+        for path in sorted(pngs, key=os.path.getmtime, reverse=True)[:4]:
+            data = _read_if_complete(path)
+            if data:
+                return Response(content=data, media_type="image/png",
+                                headers={"Cache-Control": "no-store"})
+        return Response(status_code=204)
     except Exception:
         return Response(status_code=204)
 

@@ -71,12 +71,24 @@ def _apply_config(args):
     orig = {
         "name": _cfg["encoding"]["name"],
         "frames": _cfg["Running"]["stop_frm_number"],
+        "width": _cfg["encoding"]["resolution"]["width"],
+        "height": _cfg["encoding"]["resolution"]["height"],
+        "fps": _cfg["encoding"]["fps"],
+        "game": _cfg["Running"]["game"],
     }
     if args.encoder is not None:
         new_name = "H.265" if args.encoder == "h265" else "H.264"
         os.system(f"sed -i 's/^    name: .*/    name: \"{new_name}\"/' {_CONFIG_PATH}")
     if args.frames is not None:
         os.system(f"sed -i 's/^    stop_frm_number: .*/    stop_frm_number: {args.frames}/' {_CONFIG_PATH}")
+    if getattr(args, "res", None):
+        _w, _h = args.res.lower().replace("×", "x").split("x")
+        os.system(f"sed -i 's/^        width: .*/        width: {int(_w)}/' {_CONFIG_PATH}")
+        os.system(f"sed -i 's/^        height: .*/        height: {int(_h)}/' {_CONFIG_PATH}")
+    if getattr(args, "fps", None):
+        os.system(f"sed -i 's/^    fps: .*/    fps: {int(args.fps)}/' {_CONFIG_PATH}")
+    if getattr(args, "game", None):
+        os.system(f"sed -i 's/^    game: .*/    game: \"{args.game}\"/' {_CONFIG_PATH}")
     return orig
 
 
@@ -84,14 +96,22 @@ def _restore_config(orig):
     """Restore the config lines changed by _apply_config to their originals."""
     os.system(f"sed -i 's/^    name: .*/    name: \"{orig['name']}\"/' {_CONFIG_PATH}")
     os.system(f"sed -i 's/^    stop_frm_number: .*/    stop_frm_number: {orig['frames']}/' {_CONFIG_PATH}")
+    os.system(f"sed -i 's/^        width: .*/        width: {orig['width']}/' {_CONFIG_PATH}")
+    os.system(f"sed -i 's/^        height: .*/        height: {orig['height']}/' {_CONFIG_PATH}")
+    os.system(f"sed -i 's/^    fps: .*/    fps: {orig['fps']}/' {_CONFIG_PATH}")
+    os.system(f"sed -i 's/^    game: .*/    game: \"{orig['game']}\"/' {_CONFIG_PATH}")
 
 
-def build_topology(bw, delay, loss):
+def build_topology(bw, bn_bw, delay, jitter, loss):
     """Create and return a Mininet network with 1 server, 1 switch, 1 player.
 
     Uses OVS in standalone/learning-switch mode (failMode='standalone') so
     no external controller binary is required — works with OVS 2.13+ which
     removed ovs-controller.
+
+    `bw` is the access-link rate (player side); `bn_bw` is the bottleneck rate
+    on the server uplink, where the downstream video is shaped. `jitter` is a
+    netem string like "5ms" or None for no jitter.
     """
 
     net = Mininet(
@@ -109,9 +129,15 @@ def build_topology(bw, delay, loss):
     # failMode='standalone' makes OVS act as a self-learning L2 switch
     s1 = net.addSwitch("s1", failMode="standalone")
 
-    info(f"*** Adding links  bw={bw}Mbps  delay={delay}  loss={loss}%\n")
-    net.addLink(h1, s1, cls=TCLink, bw=bw, delay=delay, loss=loss)
-    net.addLink(h2, s1, cls=TCLink, bw=bw, delay=delay, loss=loss)
+    info(f"*** Adding links  access={bw}Mbps  bottleneck={bn_bw}Mbps  "
+         f"delay={delay}  jitter={jitter}  loss={loss}%\n")
+    _h1_kw = dict(bw=bn_bw, delay=delay, loss=loss)   # server uplink = bottleneck
+    _h2_kw = dict(bw=bw,    delay=delay, loss=loss)   # player access link
+    if jitter:                                        # netem jitter needs a delay set
+        _h1_kw["jitter"] = jitter
+        _h2_kw["jitter"] = jitter
+    net.addLink(h1, s1, cls=TCLink, **_h1_kw)
+    net.addLink(h2, s1, cls=TCLink, **_h2_kw)
 
     return net, h1, h2
 
@@ -128,7 +154,13 @@ def run(args):
 
 
 def _run_inner(args):
-    net, h1, h2 = build_topology(args.bw, args.delay, args.loss)
+    # Bottleneck defaults to the access bw when not given; jitter "0"/"0ms"/empty
+    # means no netem jitter at all.
+    _bn_bw = args.bn_bw if getattr(args, "bn_bw", None) is not None else args.bw
+    _jitter = getattr(args, "jitter", None)
+    if _jitter and str(_jitter).rstrip("ms").strip() in ("", "0"):
+        _jitter = None
+    net, h1, h2 = build_topology(args.bw, _bn_bw, args.delay, _jitter, args.loss)
 
     info("*** Starting network (no external controller needed)\n")
     net.start()
@@ -137,7 +169,8 @@ def _run_inner(args):
     info(f"\n{'='*60}\n")
     info(f"  Topology: h1(10.0.0.1) -- s1 -- h2(10.0.0.2)\n")
     info(f"  Protocol: {args.protocol.upper()}   Encoder: {_enc_name}\n")
-    info(f"  Link: {args.bw}Mbps  {args.delay}  loss={args.loss}%\n")
+    info(f"  Access: {args.bw}Mbps  Bottleneck: {_bn_bw}Mbps  {args.delay}  "
+         f"jitter={_jitter or '0'}  loss={args.loss}%\n")
     info(f"{'='*60}\n\n")
 
     # --- PCAP capture (starts before handshake to capture long-header packets) ---
@@ -297,9 +330,17 @@ def _run_scream(h1, h2, args):
             _enc = ("h265" if _yaml.safe_load(_f)["encoding"]["name"].strip().upper()
                     in ("H.265", "H265", "HEVC") else "h264")
 
+    # Pass the resolution to sender.sh/receiver.sh so the GStreamer caps match
+    # the config (videoconvert does NOT rescale — a mismatch deadlocks SCReAM).
+    _res_env = ""
+    if getattr(args, "res", None):
+        _w, _h = args.res.lower().replace("×", "x").split("x")
+        _res_env = f"CGREPLAY_WIDTH={int(_w)} CGREPLAY_HEIGHT={int(_h)} "
+
     _GST_ENV = (
         f"GST_PLUGIN_PATH={_SCREAM_PLUGIN}:${{GST_PLUGIN_PATH:-}} "
         f"LD_LIBRARY_PATH={_SCREAM_LIB}:${{LD_LIBRARY_PATH:-}} "
+        f"{_res_env}"
         f"CGREPLAY_ENCODER={_enc}"
     )
 
@@ -385,6 +426,29 @@ if __name__ == "__main__":
     parser.add_argument(
         "--loss", type=float, default=DEFAULT_LOSS,
         help=f"Packet loss percentage (default: {DEFAULT_LOSS})"
+    )
+    parser.add_argument(
+        "--bn-bw", dest="bn_bw", type=float, default=None,
+        help="Bottleneck bandwidth in Mbps on the server uplink "
+             "(default: same as --bw)"
+    )
+    parser.add_argument(
+        "--jitter", default="0ms",
+        help="Link jitter, e.g. '5ms' (default: 0ms = none)"
+    )
+    parser.add_argument(
+        "--res", default=None,
+        help="Stream resolution WxH, e.g. '960x540'. Sets encoding.resolution "
+             "in config (default: leave as-is)"
+    )
+    parser.add_argument(
+        "--fps", type=int, default=None,
+        help="Frames per second. Sets encoding.fps in config (default: leave as-is)"
+    )
+    parser.add_argument(
+        "--game", default=None,
+        help="Dataset to stream: Kombat | Forza | Fortnite. Sets Running.game "
+             "in config (default: leave as-is)"
     )
     parser.add_argument(
         "--cli", action="store_true",

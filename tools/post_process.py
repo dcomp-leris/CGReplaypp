@@ -30,7 +30,6 @@ from video_Quality import compare_images, mask_qr_with_ref, FFMPEG
 from qoe import perceived_qoe
 
 CONFIG_PATH   = "config/config.yaml"
-REF_FOLDER    = os.path.join("server", "Kombat")
 LOGS_DIR      = os.path.join("player", "logs")
 
 with open(CONFIG_PATH) as f:
@@ -38,6 +37,9 @@ with open(CONFIG_PATH) as f:
 
 STOP_FRAME  = cfg["Running"]["stop_frm_number"]
 FPS_TARGET  = cfg["encoding"]["fps"]
+# Reference frames follow the game picked in config (Kombat / Forza / Fortnite),
+# so the metrics compare against the dataset that was actually streamed.
+REF_FOLDER  = os.path.join("server", cfg["Running"]["game"])
 
 
 def _pick(*candidates: str) -> str | None:

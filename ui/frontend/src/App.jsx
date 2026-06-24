@@ -6,10 +6,10 @@ import {
 
 // ── Constants ──────────────────────────────────────────────────────────────
 const CODECS    = ['H.264', 'H.265', 'VP9']
-const PROTOCOLS = ['UDP/RTP (WebRTC)', 'QUIC', 'SCReAM']
-const GAMES     = ['Fortnite', 'Foraz', 'Kombat']
+const PROTOCOLS = ['UDP/RTP (WebRTC)', 'QUIC', 'RoQ', 'SCReAM']
+const GAMES     = ['Mortal Kombat', 'Forza', 'Fortnite']
 const FPS_OPTS  = ['30', '60', '90', '120']
-const RES_OPTS  = ['640×480', '1280×720', '1920×1080']
+const RES_OPTS  = ['640×360', '960×540', '1280×720', '1920×1080']
 const TOPO_OPTS = ['linear', 'tree', 'single']
 
 // ── Styles ─────────────────────────────────────────────────────────────────
@@ -205,20 +205,37 @@ function LiveFrame({ running }) {
   // During a real run, poll the backend for the newest received game frame and
   // draw it over the procedural canvas. Hidden until a real frame loads, so the
   // canvas shows during Mininet startup or in demo mode (no /api/frame).
+  //
+  // Fetch as a blob and only swap the image when a real frame (HTTP 200) comes
+  // back. On 204/error (no complete frame ready yet) we KEEP the last good
+  // frame instead of blanking — that, plus the server only serving complete
+  // PNGs, removes the white flashes between frames on a slow machine.
   const [src, setSrc] = useState(null)
   const [ok,  setOk]  = useState(false)
   useEffect(() => {
     if (!running) { setOk(false); setSrc(null); return }
-    const id = setInterval(() => setSrc(`/api/frame?ts=${Date.now()}`), 120)
-    return () => clearInterval(id)
+    let alive = true
+    let curUrl = null
+    const tick = async () => {
+      try {
+        const r = await fetch(`/api/frame?ts=${Date.now()}`, { cache: 'no-store' })
+        if (!alive || r.status !== 200) return       // keep last frame on 204
+        const url = URL.createObjectURL(await r.blob())
+        if (!alive) { URL.revokeObjectURL(url); return }
+        if (curUrl) URL.revokeObjectURL(curUrl)
+        curUrl = url
+        setSrc(url)
+        setOk(true)
+      } catch { /* network hiccup — keep showing the last frame */ }
+    }
+    const id = setInterval(tick, 120)
+    return () => { alive = false; clearInterval(id); if (curUrl) URL.revokeObjectURL(curUrl) }
   }, [running])
   if (!running) return null
   return (
     <img
       src={src || undefined}
       alt="live game stream"
-      onLoad={() => setOk(true)}
-      onError={() => setOk(false)}
       style={{
         position: 'absolute', inset: 0, width: '100%', height: '100%',
         objectFit: 'cover', zIndex: 1, display: ok ? 'block' : 'none',
@@ -349,9 +366,9 @@ export default function App() {
   const [bnBw,      setBnBw]      = useState(10)
   const [codec,     setCodec]     = useState('H.264')
   const [proto,     setProto]     = useState('UDP/RTP (WebRTC)')
-  const [game,      setGame]      = useState('Fortnite')
+  const [game,      setGame]      = useState('Mortal Kombat')
   const [fps,       setFps]       = useState('30')
-  const [res,       setRes]       = useState('640×480')
+  const [res,       setRes]       = useState('960×540')
   const [duration,  setDuration]  = useState(30)
   const [cfgPath,   setCfgPath]   = useState('CGReplay/config/config.yaml')
 
