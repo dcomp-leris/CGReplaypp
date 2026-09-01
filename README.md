@@ -24,7 +24,7 @@ CGReplay++ is not plain video streaming. The server streams recorded game frames
 | UDP / RTP (WebRTC-style) | GStreamer (x264/x265) | none | working |
 | QUIC | aioquic + PyAV | none (reliable streams) | working |
 | SCReAM v2 | GStreamer + `gstscream` (Ericsson) | SCReAM v2 (L4S) | working |
-| RoQ (RTP over QUIC) | `mengelbart/roq` (Go) | datagram / SCReAM | in progress |
+| RoQ (RTP over QUIC) | aioquic datagrams + PyAV | none (unreliable datagrams) | working |
 
 Codecs: H.264 and H.265 (HEVC), selectable per run.
 
@@ -67,7 +67,6 @@ CGReplaypp/
 | Mininet | 2.3+ | network emulation, needs root |
 | GStreamer | 1.16+ | UDP/RTP and SCReAM paths |
 | Node.js | 18+ | web dashboard frontend |
-| Go | 1.21+ | RoQ transport only (optional) |
 | Rust + CMake | recent | building the SCReAM `gstscream` plugin |
 
 Two Python interpreters are used by design:
@@ -139,12 +138,12 @@ cp scream-scripts/sender.sh scream-scripts/receiver.sh \
    scream/gstscream/scripts/
 ```
 
-### 7. RoQ (optional, in progress)
+### 7. RoQ
 
-```bash
-# install Go 1.21+, then:
-git clone https://github.com/mengelbart/roq.git
-```
+No extra install. RoQ reuses the QUIC virtualenv (`aioquic`, `PyAV`): RTP
+packets ride in QUIC DATAGRAM frames (RFC 9683 datagram mode, unreliable),
+while the joystick command channel stays on a reliable QUIC stream. See
+`server/roq_sender.py` and `player/roq_receiver.py`.
 
 ### 8. Web dashboard
 
@@ -174,11 +173,14 @@ sudo python3 topology/simple_topology.py --protocol rtp    --encoder h264 --bw 1
 # QUIC
 sudo python3 topology/simple_topology.py --protocol quic   --encoder h264 --bw 10 --delay 10ms --loss 0
 
+# RoQ (RTP over QUIC datagrams)
+sudo python3 topology/simple_topology.py --protocol roq    --encoder h264 --bw 10 --delay 10ms --loss 0
+
 # SCReAM v2
 sudo python3 topology/simple_topology.py --protocol scream --encoder h264 --bw 10 --delay 10ms --loss 0
 ```
 
-Flags: `--protocol {rtp,quic,scream}`, `--encoder {h264,h265}`, `--bw <Mbit>`, `--delay <ms>`, `--loss <%>`, `--frames <N>`.
+Flags: `--protocol {rtp,quic,roq,scream}`, `--encoder {h264,h265}`, `--bw <Mbit>`, `--delay <ms>`, `--loss <%>`, `--frames <N>`.
 
 Each run writes per-frame metrics to `player/logs/metrics_<protocol>.csv`.
 

@@ -66,10 +66,12 @@ def load_fps_rt(mode: str) -> pd.DataFrame:
         os.path.join(LOGS_DIR, "responsetime_CG.csv"),
     )
 
-    if mode == "quic":
+    if mode in ("quic", "roq"):
+        # QUIC and RoQ save a per-frame log with a recv_time column.
+        _shared = "ply_quic_frame.csv" if mode == "quic" else "ply_roq_frame.csv"
         frame_path = _pick(
-            os.path.join(LOGS_DIR, "frame_quic.csv"),
-            os.path.join(LOGS_DIR, "ply_quic_frame.csv"),
+            os.path.join(LOGS_DIR, f"frame_{mode}.csv"),
+            os.path.join(LOGS_DIR, _shared),
         )
     else:
         frame_path = _pick(
@@ -83,7 +85,7 @@ def load_fps_rt(mode: str) -> pd.DataFrame:
         print(f"  [warn] no frame log for mode={mode}; fps/RT will be NaN")
         return pd.DataFrame(columns=["frame_id", "fps", "response_time_ms"])
 
-    if mode == "quic":
+    if mode in ("quic", "roq"):
         df = pd.read_csv(frame_path)[["frame_id", "fps", "recv_time"]]
         df = df.rename(columns={"recv_time": "timestamp"})
     else:
@@ -288,6 +290,6 @@ def compute_metrics(mode: str):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mode", choices=["quic", "rtp", "scream"], required=True)
+    parser.add_argument("--mode", choices=["quic", "rtp", "roq", "scream"], required=True)
     args = parser.parse_args()
     compute_metrics(args.mode)

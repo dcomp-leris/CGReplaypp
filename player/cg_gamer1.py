@@ -84,6 +84,17 @@ if quic_state:
     quic_run()
     raise SystemExit(0)
 
+# RoQ path — same rationale as QUIC: delegate before touching the shared logs.
+roq_state = config["protocols"].get("RoQ", False)
+if roq_state:
+    subprocess.run("../port_clean.sh")
+    with open("/tmp/player_ready", "w") as f:
+        f.write("ready")
+    from roq_receiver import run_player as roq_run
+    print("[CGReplay] RoQ transport selected — delegating to roq_receiver", flush=True)
+    roq_run()
+    raise SystemExit(0)
+
 # Remove frame Log
 if os.path.exists(frame_log):
     os.remove(frame_log)

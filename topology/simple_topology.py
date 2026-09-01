@@ -179,7 +179,7 @@ def _run_inner(args):
         os.remove(PCAP_TMP)
 
     # Capture the relevant UDP port for the selected protocol
-    capture_port = QUIC_PORT if args.protocol == "quic" else RTP_PORT
+    capture_port = QUIC_PORT if args.protocol in ("quic", "roq") else RTP_PORT
     info(f"*** Starting PCAP capture on h2 (any iface, UDP port {capture_port})\n")
     info(f"    tcpdump user inside h2: {h2.cmd('id').strip()}\n")
     h2.cmd(
@@ -192,6 +192,8 @@ def _run_inner(args):
 
     if args.protocol == "quic":
         _run_quic(h1, h2, args)
+    elif args.protocol == "roq":
+        _run_roq(h1, h2, args)
     elif args.protocol == "scream":
         _run_scream(h1, h2, args)
     else:
@@ -233,7 +235,8 @@ def _run_inner(args):
         # shared across modes and overwritten by each run, so a later test (or a
         # manual post_process re-run) would otherwise read the wrong mode's data.
         _logs = os.path.join(PLAYER_DIR, "logs")
-        _frame_log = "ply_quic_frame.csv" if args.protocol == "quic" else "ply_frame.csv"
+        _frame_log = {"quic": "ply_quic_frame.csv",
+                      "roq": "ply_roq_frame.csv"}.get(args.protocol, "ply_frame.csv")
         for _src_name, _dst_name in [
             (_frame_log, f"frame_{args.protocol}.csv"),
             ("responsetime_CG.csv", f"responsetime_{args.protocol}.csv"),
@@ -286,6 +289,43 @@ def _run_quic(h1, h2, args):
     info(h1.cmd("tail -20 /tmp/h1_quic.log"))
     info("\n--- h2 player log (tail) ---\n")
     info(h2.cmd("tail -20 /tmp/h2_quic.log"))
+
+
+def _run_roq(h1, h2, args):
+    """Launch CGReplay with RoQ transport (RTP over QUIC datagrams).
+
+    Same Python pipeline as QUIC (venv: aioquic, PyAV) — only the config flag
+    changes, which makes cg_server1/cg_gamer1 delegate to roq_sender/roq_receiver.
+    """
+    _config = os.path.join(_SCRIPT_DIR, "../config/config.yaml")
+    os.system(f"sed -i 's/QUIC: True/QUIC: False/' {_config}")
+    os.system(f"sed -i 's/SCReAM: True/SCReAM: False/' {_config}")
+    os.system(f"sed -i 's/RoQ: False/RoQ: True/' {_config}")
+
+    info("*** Launching CGReplay server (RoQ mode) on h1...\n")
+    h1.cmd(
+        f"cd {SERVER_DIR} && "
+        f"DISPLAY={_HOST_DISPLAY} PYTHONUNBUFFERED=1 {VENV} cg_server1.py > /tmp/h1_roq.log 2>&1 &"
+    )
+    time.sleep(1)  # wait for server to bind
+
+    info("*** Launching CGReplay player (RoQ mode) on h2...\n")
+    h2.cmd(
+        f"cd {PLAYER_DIR} && "
+        f"DISPLAY={_HOST_DISPLAY} PYTHONUNBUFFERED=1 {VENV} cg_gamer1.py > /tmp/h2_roq.log 2>&1 &"
+    )
+
+    info("*** Streaming in progress — waiting for completion...\n")
+    _wait_for_completion(h2, "/tmp/h2_roq.log", "Receiver finished", timeout=300)
+
+    # Restore config (leave all transport flags off — same neutral rest state
+    # the QUIC/RTP paths leave behind).
+    os.system(f"sed -i 's/RoQ: True/RoQ: False/' {_config}")
+
+    info("\n--- h1 server log (tail) ---\n")
+    info(h1.cmd("tail -20 /tmp/h1_roq.log"))
+    info("\n--- h2 player log (tail) ---\n")
+    info(h2.cmd("tail -20 /tmp/h2_roq.log"))
 
 
 def _run_rtp(h1, h2, args):
@@ -403,7 +443,7 @@ if __name__ == "__main__":
         description="CGReplay simple Mininet topology: h1 -- s1 -- h2"
     )
     parser.add_argument(
-        "--protocol", choices=["rtp", "quic", "scream"], default="quic",
+        "--protocol", choices=["rtp", "quic", "roq", "scream"], default="quic",
         help="Transport protocol (default: quic)"
     )
     parser.add_argument(

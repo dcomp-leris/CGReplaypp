@@ -62,6 +62,7 @@ SYS_PYTHON   = "/usr/bin/python3"   # interpreter that has Mininet
 _PROTO_MAP = {
     "UDP/RTP (WebRTC)": "rtp", "UDP/RTP": "rtp", "UDP": "rtp", "RTP": "rtp",
     "QUIC": "quic", "SCReAM": "scream", "SCREAM": "scream",
+    "RoQ": "roq", "ROQ": "roq", "RTP/QUIC": "roq",
 }
 _CODEC_MAP = {"H.264": "h264", "H264": "h264", "H.265": "h265", "H265": "h265"}
 
@@ -125,8 +126,8 @@ async def run_real_experiment(cfg: dict):
     codec   = cfg.get("codec", "H.264")
     encoder = _CODEC_MAP.get(codec)
 
-    if proto not in ("rtp", "quic", "scream"):
-        await broadcast({"type": "error", "msg": f"Protocol '{cfg.get('proto')}' is not supported by CGReplay (use UDP/RTP, QUIC or SCReAM)."})
+    if proto not in ("rtp", "quic", "roq", "scream"):
+        await broadcast({"type": "error", "msg": f"Protocol '{cfg.get('proto')}' is not supported by CGReplay (use UDP/RTP, QUIC, RoQ or SCReAM)."})
         await broadcast({"type": "done", "msg": "aborted — unsupported protocol"})
         sim.running = False
         return
@@ -285,7 +286,7 @@ def compute_metrics(cfg: dict, t: int) -> dict:
 
     congestion   = max(0.0, min(1.0, 1.0 - bn_bw / 100.0))
     codec_boost  = {"H.265": 3, "VP9": 2, "H.264": 0}.get(codec, 0)
-    proto_boost  = {"SCReAM": 4, "QUIC": 2, "UDP/RTP (WebRTC)": 0}.get(proto, 0)
+    proto_boost  = {"SCReAM": 4, "QUIC": 2, "RoQ": 1, "UDP/RTP (WebRTC)": 0}.get(proto, 0)
     rng          = random.Random(t * 7 + int(loss * 13))
 
     rt   = round(delay * 2 + jitter * 2 + loss * 5 + congestion * 80 + rng.uniform(-10, 10))

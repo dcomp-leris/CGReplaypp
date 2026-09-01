@@ -105,6 +105,9 @@ protocols:
     receiver: "../../scream/gstscream/scripts/receiver.sh"
     # QUIC transport (used by quic_sender.py / quic_receiver.py)
     QUIC: False
+    # RoQ transport — RTP over QUIC datagrams (roq_sender.py / roq_receiver.py).
+    # Reuses quic_port/quic_cert/quic_key; RoQ and QUIC never run at once.
+    RoQ: False
     quic_port: 4433
     quic_cert: "../../rtp_stream_creation/server.pem"
     quic_key:  "../../rtp_stream_creation/server.key"

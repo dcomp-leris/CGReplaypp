@@ -89,6 +89,7 @@ enc_extra = 'option-string="repeat-headers=1"' if MyvideoEncoder in ("H.265", "H
 scream_state=config["protocols"]["SCReAM"]                      # CCA Protocol for UDP as SCReAM developed by Ericsson!
 scream_sender=config["protocols"]["sender"]                     # Sender as CGServer!
 quic_state  =config["protocols"].get("QUIC", False)            # QUIC transport (replaces RTP when True)
+roq_state   =config["protocols"].get("RoQ", False)             # RoQ transport: RTP over QUIC datagrams
 
 
 # Loading Sync Setup *******************************************************************************************
@@ -538,6 +539,11 @@ if __name__ == "__main__":
         import asyncio
         print("[CGReplay] QUIC transport selected — delegating to quic_sender")
         asyncio.run(quic_main())
+    elif roq_state:
+        from roq_sender import main as roq_main
+        import asyncio
+        print("[CGReplay] RoQ transport selected — delegating to roq_sender")
+        asyncio.run(roq_main())
     else:
         stream_frames(game_name)
 

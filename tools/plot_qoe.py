@@ -20,9 +20,9 @@ import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
 
 LOGS_DIR  = os.path.join("player", "logs")
-MODES     = ["quic", "rtp", "scream"]
-COLORS    = {"quic": "#1f77b4", "rtp": "#ff7f0e", "scream": "#2ca02c"}
-LABELS    = {"quic": "QUIC", "rtp": "Pure UDP (RTP)", "scream": "SCReAM"}
+MODES     = ["quic", "rtp", "roq", "scream"]
+COLORS    = {"quic": "#1f77b4", "rtp": "#ff7f0e", "roq": "#9467bd", "scream": "#2ca02c"}
+LABELS    = {"quic": "QUIC", "rtp": "Pure UDP (RTP)", "roq": "RoQ (RTP/QUIC)", "scream": "SCReAM"}
 
 FIG_DPI   = 300
 FIG_SIZE  = (8, 4)
@@ -48,8 +48,8 @@ def styled_ax(ax, ylabel: str, title: str):
 
 
 # Distinct line style + marker per mode (so the curves read apart in print too)
-STYLES  = {"quic": "-", "rtp": "--", "scream": ":"}
-MARKERS = {"quic": "o", "rtp": "s", "scream": "D"}
+STYLES  = {"quic": "-", "rtp": "--", "roq": "-.", "scream": ":"}
+MARKERS = {"quic": "o", "rtp": "s", "roq": "^", "scream": "D"}
 
 
 def plot_figure(col: str, ylabel: str, title: str, filename: str,
