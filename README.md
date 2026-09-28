@@ -6,7 +6,7 @@
 
 [![Conference](https://img.shields.io/badge/Demo-Presnetation-blue)](https://docs.google.com/presentation/d/1vZZdlMLaBve1d6VJK2y9-KNPEcyZjNuUikISQc4mf00/edit?usp=sharing)
 [![Conference](https://img.shields.io/badge/Demo-Video-yellow)](https://youtu.be/NaCQpPOez-k)
-[![Conference](https://img.shields.io/badge/Demo-Paper-red)](-)
+[![Conference](https://img.shields.io/badge/Demo-Paper-red)](https://github.com/dcomp-leris/CGReplaypp/blob/main/ACMMM_DEMO_2026_CGReplaypp.pdf)
 ---
 UFSCar LERIS Lab. CGReplay++ extends [CGReplay](https://github.com/dcomp-leris/CGReplay) with multiple transports, a quality-of-experience (QoE) measurement pipeline (VMAF, SSIM, PSNR, response time), and a web dashboard to configure, run, and compare experiments.
 
