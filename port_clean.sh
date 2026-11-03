@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # List of UDP ports to check and kill processes
-ports=("5000" "5001"  "5002" "5003" "5004" "5005" "5006" "5007" "5008" "5009" "5010")  # Add more ports as needed
+ports=("5000" "5001"  "5002" "5003" "5004" "5005" "5006" "5007" "5008" "5009" "5010" "5011" "5012" "5013")  # 5011-5013: RTCP feedback (TWCC/RFC 8888) + RFC 8888 relay
 #ports=({5000..5020})
 
 # Path to the YAML file

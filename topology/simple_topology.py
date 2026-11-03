@@ -178,12 +178,18 @@ def _run_inner(args):
     if os.path.exists(PCAP_TMP):
         os.remove(PCAP_TMP)
 
-    # Capture the relevant UDP port for the selected protocol
-    capture_port = QUIC_PORT if args.protocol in ("quic", "roq") else RTP_PORT
-    info(f"*** Starting PCAP capture on h2 (any iface, UDP port {capture_port})\n")
+    # Capture filter for the selected protocol. QUIC/RoQ: everything rides on the QUIC port.
+    # RTP/SCReAM: all UDP between h1 and h2 -> video (5002), joystick commands (5002->5003),
+    # RTCP feedback (TWCC / RFC 8888 -> 5011, SR -> 5012) and SCReAM feedback. Loopback is
+    # excluded so the RFC 8888 relay's local copy (127.0.0.1:5013) is not captured twice.
+    if args.protocol in ("quic", "roq"):
+        capture_filter = f"udp port {QUIC_PORT}"
+    else:
+        capture_filter = "udp and not host 127.0.0.1"
+    info(f"*** Starting PCAP capture on h2 (any iface, filter: {capture_filter})\n")
     info(f"    tcpdump user inside h2: {h2.cmd('id').strip()}\n")
     h2.cmd(
-        f"tcpdump -i any -w {PCAP_TMP} udp port {capture_port} "
+        f"tcpdump -i any -w {PCAP_TMP} '{capture_filter}' "
         f"> /tmp/tcpdump.log 2>&1 & echo $! > /tmp/tcpdump.pid"
     )
     time.sleep(1)  # give tcpdump time to open the capture device

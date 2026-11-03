@@ -425,7 +425,8 @@ def stream_frames(game_name):
             gcc_kbps = gcc.get_target_kbps()
             app_kbps = min(max(bitrate, bitrate_min), bitrate_max)
             new_rate = int(min(app_kbps, gcc_kbps))
-            if abs(new_rate - applied_bitrate) >= max(25, 0.03 * applied_bitrate):
+            # decreases apply at once (congestion); increases need >= 3 % to avoid encoder churn
+            if new_rate < applied_bitrate or new_rate - applied_bitrate >= max(25, 0.03 * applied_bitrate):
                 venc.set_property("bitrate", new_rate)
                 applied_bitrate = new_rate
             with open(rate_combined_log, "a") as f:
@@ -503,19 +504,19 @@ def stream_frames(game_name):
                 Nack_counter = 0 
                 if my_gap <= window_min:    # Check to keep sync using sliding between min/max window
                     print(f'(Ack) [High Sync:(Fast Rate Increase)] ==> Frame ID is {frame_id} with Gap {my_gap} \n [player fps = {received_fps}] [server fps = {current_srv_fps}] \n [player cps = {received_cps} [server cps = {current_cps}]] | bitrate = {bitrate}')
-                    bitrate = bitrate + (bitrate * Enc_Rate_jump) if bitrate_min <= bitrate <= bitrate_max else bitrate
+                    bitrate = min(max(bitrate + (bitrate * Enc_Rate_jump), bitrate_min), bitrate_max)  # clamp (was: froze outside [min,max])
                     #rate_ctl[0] = 'Fast Increase', rate_ctl[1] = 0.2, rate_ctl[2] = bitrate
                     rate_ctl = ['Rate Jump', Enc_Rate_jump, bitrate,rate_ctl[3]]
 
                 elif window_min < my_gap <= window_max:
                     print(f'(Ack) [Sync: (Rate Increase)] ==> Frame ID is {frame_id} with Gap {my_gap} \n [player fps = {received_fps}] [server fps = {current_srv_fps}] \n [player cps = {received_cps} [server cps = {current_cps}]] | bitrate = {bitrate}')
-                    bitrate = bitrate + (bitrate * Enc_Rate_rise) if bitrate_min <= bitrate <= bitrate_max else bitrate
+                    bitrate = min(max(bitrate + (bitrate * Enc_Rate_rise), bitrate_min), bitrate_max)  # clamp (was: froze outside [min,max])
                     rate_ctl = ['Rate Rise', Enc_Rate_rise,bitrate,rate_ctl[3]]
                     
                 elif my_gap > window_max:
                     print(f'(Ack) [Critical Sync: (Rate Decrease)] ==> Frame ID is {frame_id} with Gap {my_gap} \n [player fps = {received_fps}] [server fps = {current_srv_fps}] \n [player cps = {received_cps} [server cps = {current_cps}]] | bitrate = {bitrate}')
                     # print(f'(Ack) (**Wait**) ==> Received Frame is {received_fame_id} == current {frame_id} \n [fps = {received_fps}] [server fps = {current_srv_fps}] but Gap is {my_gap}')
-                    bitrate = bitrate - (bitrate * Enc_Rate_decrease) if bitrate_min <= bitrate <= bitrate_max else bitrate
+                    bitrate = min(max(bitrate - (bitrate * Enc_Rate_decrease), bitrate_min), bitrate_max)  # clamp (was: froze outside [min,max])
                     rate_ctl = ['Rate Decrease', Enc_Rate_decrease, bitrate,rate_ctl[3]]
                     #idx = idx - my_gap
 
@@ -527,7 +528,7 @@ def stream_frames(game_name):
                 if Nack_counter == 0:
                     #print(f'(Nack) ==> Received Frame is {received_fame_id}')
                     print(f'(Nack) [Not Sync: (Decrease & lagged!)] ==> Frame ID is {frame_id} with Gap {my_gap} \n [player fps = {received_fps}] [server fps = {current_srv_fps}] \n [player cps = {received_cps} [server cps = {current_cps}]] | bitrate = {bitrate}')
-                    bitrate = bitrate - (bitrate * 0.2) if bitrate_min <= bitrate <= bitrate_max else bitrate
+                    bitrate = min(max(bitrate - (bitrate * 0.2), bitrate_min), bitrate_max)  # clamp (was: froze outside [min,max])
                     idx = received_fame_id - round(my_gap/2,) # Create the lag!  
                     #time.sleep(0.0001)
                     Nack_counter = Nack_counter + 1
@@ -536,7 +537,7 @@ def stream_frames(game_name):
 
                 else:
                     print(f'(Nack) [Fast Decrease & lagged!] ==> Frame ID is {frame_id} with Gap {my_gap} \n [player fps = {received_fps}] [server fps = {current_srv_fps}] \n [player cps = {received_cps} [server cps = {current_cps}]] | bitrate = {bitrate}')
-                    bitrate = bitrate - (bitrate * 0.5) if bitrate_min <= bitrate <= bitrate_max else bitrate
+                    bitrate = min(max(bitrate - (bitrate * 0.5), bitrate_min), bitrate_max)  # clamp (was: froze outside [min,max])
                     idx = received_fame_id - (my_gap/2)
                     #time.sleep(0.0001)
                     Nack_counter = Nack_counter + 1
@@ -564,17 +565,17 @@ def stream_frames(game_name):
                         state[0] = 'Not Sync'
                     
                     if my_gap <= window_min:
-                        bitrate = bitrate + (bitrate * Enc_Rate_jump) if bitrate_min <= bitrate <= bitrate_max else bitrate
+                        bitrate = min(max(bitrate + (bitrate * Enc_Rate_jump), bitrate_min), bitrate_max)  # clamp (was: froze outside [min,max])
                         state[1] = 'Rate Jump'
                         rate_ctl = ['Rate Jump',  Enc_Rate_jump,  bitrate,rate_ctl[3]]
 
                     elif window_min < my_gap <= window_max:
-                        bitrate = bitrate + (bitrate * Enc_Rate_rise) if bitrate_min <= bitrate <= bitrate_max else bitrate
+                        bitrate = min(max(bitrate + (bitrate * Enc_Rate_rise), bitrate_min), bitrate_max)  # clamp (was: froze outside [min,max])
                         state[1] = 'Rate Rise'
                         rate_ctl = ['Rate Rise', Enc_Rate_rise,  bitrate,rate_ctl[3]]
 
                     elif my_gap > window_max:
-                        bitrate = bitrate - (bitrate * Enc_Rate_fall) if bitrate_min <= bitrate <= bitrate_max else bitrate
+                        bitrate = min(max(bitrate - (bitrate * Enc_Rate_fall), bitrate_min), bitrate_max)  # clamp (was: froze outside [min,max])
                         state[1] = 'Rate Fall'
                         #idx = idx - my_gap
                         rate_ctl = ['Fast Decrease & lagged',[Enc_Rate_fall, my_gap],  bitrate,rate_ctl[3]]
