@@ -112,6 +112,23 @@ protocols:
     quic_cert: "../../rtp_stream_creation/server.pem"
     quic_key:  "../../rtp_stream_creation/server.key"
 
+# ---------------------------------------------------------------------------------------#
+# RTCP congestion feedback + GCC (UDP/RTP GStreamer path; ignored by QUIC/RoQ/SCReAM).
+# The server's encoder runs at min(application-layer rate, GCC rate): the frame/command
+# sync rate control ("sync" section above) is kept and the network feedback adds a cap.
+congestion_control:
+    feedback: "twcc"           # "twcc" (RTCP TWCC, GStreamer >= 1.20) | "rfc8888" (RTCP CCFB) | "none" (original)
+    twcc_ext_id: 1             # twcc: RTP header-extension id carrying the transport-wide seqnum
+    rtcp_server_port: 5011     # server listens here for the player's feedback (TWCC or RFC 8888)
+    rtcp_player_port: 5012     # twcc: player listens here for the server's RTCP (SR)
+    rfc8888_relay_port: 5013   # rfc8888: local port the player's decoder listens on (behind the relay)
+    rfc8888_interval_ms: 33    # rfc8888: CCFB report interval (~1 per frame at 30 fps)
+    gcc_min_kbps: 300          # GCC lower bound (kbps)
+    gcc_max_kbps: 6000         # GCC upper bound (kbps), usually = encoding.bitrate_max
+    jitter_latency_ms: 20      # player rtpbin jitterbuffer latency (ms)
+    log_gcc: "./logs/srv_gcc.csv"                    # per-feedback GCC state (server)
+    log_rate_combined: "./logs/srv_rate_combined.csv" # frame_id, app, gcc, applied bitrate (server)
+
 capturing_options:
     enable_pcap: True
 

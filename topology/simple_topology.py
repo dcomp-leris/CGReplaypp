@@ -328,6 +328,12 @@ def _run_roq(h1, h2, args):
     info(h2.cmd("tail -20 /tmp/h2_roq.log"))
 
 
+def _twcc_env(args):
+    """CGREPLAY_CC_FEEDBACK for --cc-feedback; empty = use congestion_control.feedback from config."""
+    t = getattr(args, "cc_feedback", None)
+    return "" if t is None else f"CGREPLAY_CC_FEEDBACK={t} "
+
+
 def _run_rtp(h1, h2, args):
     """Launch original RTP-based CGReplay server and gamer."""
     _config = os.path.join(_SCRIPT_DIR, "../config/config.yaml")
@@ -337,14 +343,14 @@ def _run_rtp(h1, h2, args):
     info("*** Launching RTP server on h1...\n")
     h1.cmd(
         f"cd {SERVER_DIR} && "
-        f"DISPLAY={_HOST_DISPLAY} PYTHONUNBUFFERED=1 {SYS_PY} cg_server1.py > /tmp/h1_rtp.log 2>&1 &"
+        f"{_twcc_env(args)}DISPLAY={_HOST_DISPLAY} PYTHONUNBUFFERED=1 {SYS_PY} cg_server1.py > /tmp/h1_rtp.log 2>&1 &"
     )
     time.sleep(1)
 
     info("*** Launching RTP player on h2...\n")
     h2.cmd(
         f"cd {PLAYER_DIR} && "
-        f"DISPLAY={_HOST_DISPLAY} PYTHONUNBUFFERED=1 {SYS_PY} cg_gamer1.py > /tmp/h2_rtp.log 2>&1 &"
+        f"{_twcc_env(args)}DISPLAY={_HOST_DISPLAY} PYTHONUNBUFFERED=1 {SYS_PY} cg_gamer1.py > /tmp/h2_rtp.log 2>&1 &"
     )
 
     info("*** Streaming in progress — waiting for completion...\n")
@@ -489,6 +495,11 @@ if __name__ == "__main__":
         "--game", default=None,
         help="Dataset to stream: Kombat | Forza | Fortnite. Sets Running.game "
              "in config (default: leave as-is)"
+    )
+    parser.add_argument(
+        "--cc-feedback", dest="cc_feedback", choices=["twcc", "rfc8888", "none"], default=None,
+        help="rtp only: RTCP congestion feedback driving GCC on top of the app-layer "
+             "rate control (default: congestion_control.feedback in config)"
     )
     parser.add_argument(
         "--cli", action="store_true",

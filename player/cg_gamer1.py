@@ -129,6 +129,19 @@ myrtp = config["encoding"][MyvideoEncoder]["Depacketization"]
 scream_state=config["protocols"]["SCReAM"]
 scream_receiver=config["protocols"]["receiver"]
 
+# RTCP congestion feedback for the server's GCC (UDP/RTP GStreamer path only): "twcc" | "rfc8888" | "none"
+cc_cfg = config.get("congestion_control", {}) or {}
+cc_feedback = str(os.environ.get("CGREPLAY_CC_FEEDBACK") or cc_cfg.get("feedback", "none")).strip().lower()
+twcc_state = cc_feedback == "twcc"
+rfc8888_state = cc_feedback == "rfc8888"
+rfc8888_relay_port = int(cc_cfg.get("rfc8888_relay_port", 5013))    # local port the decoder listens on
+rfc8888_interval = float(cc_cfg.get("rfc8888_interval_ms", 33))     # CCFB report interval (ms)
+twcc_ext_id = int(cc_cfg.get("twcc_ext_id", 1))
+rtcp_server_port = int(cc_cfg.get("rtcp_server_port", 5011))    # player sends RTCP (TWCC feedback) here
+rtcp_player_port = int(cc_cfg.get("rtcp_player_port", 5012))    # player receives RTCP (SR) here
+jitter_latency = int(cc_cfg.get("jitter_latency_ms", 20))       # rtpbin jitterbuffer latency (ms)
+TWCC_URI = "http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01"
+
 # Custom function to load autocommands.txt while handling the complex 'command' field
 def load_syncfile(file_path):
     autocommands = []
@@ -251,7 +264,31 @@ def read_qr_code_from_frame(frame):
 
 
 
-if scream_state==False:
+if scream_state==False and twcc_state:
+    # Same depay/decode chain, but through rtpbin: it reads the TWCC seqnums the server puts in
+    # every RTP packet and sends RTCP TWCC feedback (RTPFB FMT=15) back to the server's GCC.
+    _enc_name = "H265" if MyvideoEncoder in ("H.265", "H265", "HEVC") else "H264"
+    gstreamer_pipeline = (
+        f"rtpbin name=rtpbin rtp-profile=avpf latency={jitter_latency} "
+        f"udpsrc port={player_port} timeout=3000000000 caps=\"application/x-rtp,media=video,clock-rate=90000,"
+        f"encoding-name={_enc_name},payload=96,extmap-{twcc_ext_id}=(string){TWCC_URI}\" ! rtpbin.recv_rtp_sink_0 "
+        f"rtpbin. ! queue max-size-time=1000000000 ! {myrtp} ! {mydecoder} ! videoconvert ! appsink "
+        f"udpsrc port={rtcp_player_port} ! rtpbin.recv_rtcp_sink_0 "
+        f"rtpbin.send_rtcp_src_0 ! udpsink host={cg_server_ip} port={rtcp_server_port} sync=false async=false"
+    )
+    print(f"[TWCC] RTCP/TWCC feedback enabled -> {cg_server_ip}:{rtcp_server_port}")
+elif scream_state==False and rfc8888_state:
+    # The relay owns the streaming port, timestamps every RTP packet, forwards it to the
+    # decoder on 127.0.0.1:rfc8888_relay_port and sends RFC 8888 CCFB reports to the server.
+    from rfc8888_receiver import Rfc8888Relay
+    Rfc8888Relay(player_ip, player_port, rfc8888_relay_port,
+                 cg_server_ip, rtcp_server_port, rfc8888_interval).start()
+    gstreamer_pipeline = (
+        f"udpsrc address=127.0.0.1 port={rfc8888_relay_port} timeout=3000000000 ! application/x-rtp, payload=96 ! "
+        f"queue max-size-time=1000000000 ! {myrtp} ! {mydecoder} ! videoconvert ! appsink"
+    )
+    print(f"[RFC8888] RTCP CCFB (RFC 8888) feedback enabled -> {cg_server_ip}:{rtcp_server_port}")
+elif scream_state==False:
     # timeout=3000000000 ns = 3s — after server stops, udpsrc emits EOS so cap.read() returns False
     gstreamer_pipeline = (
         f"udpsrc port={player_port} timeout=3000000000 ! application/x-rtp, payload=96 ! "

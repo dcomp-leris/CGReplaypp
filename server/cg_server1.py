@@ -91,6 +91,25 @@ scream_sender=config["protocols"]["sender"]                     # Sender as CGSe
 quic_state  =config["protocols"].get("QUIC", False)            # QUIC transport (replaces RTP when True)
 roq_state   =config["protocols"].get("RoQ", False)             # RoQ transport: RTP over QUIC datagrams
 
+# Loading RTCP feedback + GCC Setup (UDP/RTP GStreamer path only) **********************************************
+# Network-layer rate control: RTCP congestion feedback -> GCC -> encoder bitrate. It works ALONGSIDE the
+# application-layer (frame/command sync) rate control below: the encoder gets min(app_rate, gcc_rate).
+#   feedback: "twcc"    -> RTCP transport-wide CC feedback (draft-holmer, GStreamer rtpbin, >= 1.20)
+#             "rfc8888" -> RTCP CCFB, RFC 8888 (implemented in rfc8888.py / player/rfc8888_receiver.py)
+#             "none"    -> original behaviour, application-layer rate control only
+cc_cfg = config.get("congestion_control", {}) or {}
+cc_feedback = str(os.environ.get("CGREPLAY_CC_FEEDBACK") or cc_cfg.get("feedback", "none")).strip().lower()
+if cc_feedback not in ("twcc", "rfc8888", "none"):
+    print(f"[CC] unknown congestion_control.feedback '{cc_feedback}' -> 'none'")
+    cc_feedback = "none"
+twcc_state = cc_feedback == "twcc"
+rfc8888_state = cc_feedback == "rfc8888"
+twcc_ext_id = int(cc_cfg.get("twcc_ext_id", 1))                 # RTP header-extension id for TWCC
+rtcp_server_port = int(cc_cfg.get("rtcp_server_port", 5011))    # server receives RTCP (TWCC feedback) here
+rtcp_player_port = int(cc_cfg.get("rtcp_player_port", 5012))    # player receives RTCP (SR) here
+gcc_log = cc_cfg.get("log_gcc", "./logs/srv_gcc.csv")           # per-feedback GCC internals
+rate_combined_log = cc_cfg.get("log_rate_combined", "./logs/srv_rate_combined.csv")  # app vs gcc vs applied
+
 
 # Loading Sync Setup *******************************************************************************************
 Enc_Rate_jump = config["sync"]["jump"]                          # CGReplay Encoding Frame Rate jump!
@@ -211,6 +230,8 @@ def stream_frames(game_name):
     gi.require_version('Gst', '1.0')
     from gi.repository import Gst
     Gst.init(None)
+    gcc = None          # GCC controller (only when RTCP/TWCC is active)
+    venc = None         # encoder element whose bitrate GCC + app-layer drive
 
     global bitrate
     # setup Encoding H.264
@@ -248,16 +269,66 @@ def stream_frames(game_name):
         pipeline_str = f"""
             appsrc name=source is-live=true block=true format=GST_FORMAT_TIME do-timestamp=true !
             videoconvert ! video/x-raw,format=I420,width={resolution_width},height={resolution_height},framerate={fps}/1 !
-            {myencoder} bitrate={bitrate} speed-preset=ultrafast tune=zerolatency key-int-max={GOP} {enc_extra} !
-            {myparser} ! {myrtp} !
+            {myencoder} name=venc bitrate={bitrate} speed-preset=ultrafast tune=zerolatency key-int-max={GOP} {enc_extra} !
+            {myparser} ! {myrtp} name=pay !
             udpsink host={player_ip} port={player_port} bind-port={cg_server_port}
         """
         
         # frame_size_bytes ≈ (bitrate_kbps * 1000) / 8 / fps
 
+        if twcc_state and Gst.ElementFactory.find("rtphdrexttwcc") is None:
+            print("[TWCC] rtphdrexttwcc not available (needs GStreamer >= 1.20) -> TWCC/GCC disabled, app-layer rate control only")
+        elif twcc_state:
+            # Same encoder/payloader chain, but routed through rtpbin so that every RTP packet
+            # carries a transport-wide seqnum and the player's RTCP TWCC feedback comes back.
+            pipeline_str = f"""
+                rtpbin name=rtpbin rtp-profile=avpf
+                appsrc name=source is-live=true block=true format=GST_FORMAT_TIME do-timestamp=true !
+                videoconvert ! video/x-raw,format=I420,width={resolution_width},height={resolution_height},framerate={fps}/1 !
+                {myencoder} name=venc bitrate={bitrate} speed-preset=ultrafast tune=zerolatency key-int-max={GOP} {enc_extra} !
+                {myparser} ! {myrtp} name=pay pt=96 ! rtpbin.send_rtp_sink_0
+                rtpbin.send_rtp_src_0 ! udpsink host={player_ip} port={player_port} bind-port={cg_server_port}
+                rtpbin.send_rtcp_src_0 ! udpsink host={player_ip} port={rtcp_player_port} sync=false async=false
+                udpsrc address={cg_server_ipadress} port={rtcp_server_port} ! rtpbin.recv_rtcp_sink_0
+            """
+
         pipeline = Gst.parse_launch(pipeline_str)
         #print(pipeline)
         appsrc = pipeline.get_by_name("source")
+
+        if twcc_state and pipeline.get_by_name("rtpbin") is not None:
+            gi.require_version('GstRtp', '1.0')
+            from gi.repository import GstRtp
+            from gcc_controller import GCCController, attach_twcc
+            venc = pipeline.get_by_name("venc")
+            gcc = GCCController(start_kbps=bitrate,
+                                min_kbps=cc_cfg.get("gcc_min_kbps", 300),
+                                max_kbps=cc_cfg.get("gcc_max_kbps", bitrate_max),
+                                log_path=gcc_log)
+            if attach_twcc(Gst, GstRtp, pipeline.get_by_name("pay"), gcc, twcc_ext_id):
+                print(f"[TWCC] RTCP/TWCC + GCC enabled (RTCP in :{rtcp_server_port}, out -> {player_ip}:{rtcp_player_port})")
+            else:
+                print("[TWCC] could not create TWCC header extension -> GCC disabled")
+                gcc = None
+
+        elif rfc8888_state:
+            # Original pipeline untouched; send times come from a probe on the payloader and
+            # the player's RFC 8888 CCFB reports arrive on rtcp_server_port.
+            from gcc_controller import GCCController
+            from rfc8888 import SendTracker, Rfc8888Server
+            venc = pipeline.get_by_name("venc")
+            gcc = GCCController(start_kbps=bitrate,
+                                min_kbps=cc_cfg.get("gcc_min_kbps", 300),
+                                max_kbps=cc_cfg.get("gcc_max_kbps", bitrate_max),
+                                log_path=gcc_log)
+            tracker = SendTracker()
+            tracker.attach(Gst, pipeline.get_by_name("pay").get_static_pad("src"))
+            Rfc8888Server(cg_server_ipadress, rtcp_server_port, tracker, gcc).start()
+            print(f"[RFC8888] RTCP CCFB (RFC 8888) + GCC enabled (CCFB in :{rtcp_server_port})")
+
+        if gcc is not None:
+            with open(rate_combined_log, "w") as f:
+                f.write("frame_id,app_bitrate,gcc_bitrate,applied_bitrate\n")
     else:
         print(f"It's value is  {scream_state}-SCReAM Enabled")
         # SCReAM
@@ -295,6 +366,8 @@ def stream_frames(game_name):
     cmd_counter = 0  #sync_df.shape[0] # max number 
     previous_time = time.perf_counter()
     
+
+    applied_bitrate = bitrate   # what the encoder is actually running at (TWCC/GCC mode)
 
     idx = 0
     while idx < len(png_files):
@@ -346,6 +419,18 @@ def stream_frames(game_name):
         frame_byte = frame.tobytes()
         gst_buffer = Gst.Buffer.new_wrapped(frame_byte) #frame.tobytes())
          
+        # RTCP feedback (TWCC or RFC 8888) + GCC: encoder rate = min(application-layer rate, GCC network rate).
+        # The application-layer logic below keeps updating `bitrate` exactly as before.
+        if gcc is not None and venc is not None:
+            gcc_kbps = gcc.get_target_kbps()
+            app_kbps = min(max(bitrate, bitrate_min), bitrate_max)
+            new_rate = int(min(app_kbps, gcc_kbps))
+            if abs(new_rate - applied_bitrate) >= max(25, 0.03 * applied_bitrate):
+                venc.set_property("bitrate", new_rate)
+                applied_bitrate = new_rate
+            with open(rate_combined_log, "a") as f:
+                f.write(f"{frame_id},{bitrate},{gcc_kbps:.1f},{applied_bitrate}\n")
+
         # Debug: Keep it in mind 
         appsrc.emit("push-buffer", gst_buffer)
         # fpscomputing + processing time (Rendering)
