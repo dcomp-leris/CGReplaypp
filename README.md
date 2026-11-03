@@ -21,7 +21,7 @@ CGReplay++ is not plain video streaming. The server streams recorded game frames
 
 | Transport | Stack | Congestion control | Status |
 |-----------|-------|--------------------|--------|
-| UDP / RTP (WebRTC-style) | GStreamer (x264/x265) | none | working |
+| UDP / RTP (WebRTC-style) | GStreamer (x264/x265) | GCC on RTCP feedback (TWCC or RFC 8888) + app-layer sync rate control | working |
 | QUIC | aioquic + PyAV | none (reliable streams) | working |
 | SCReAM v2 | GStreamer + `gstscream` (Ericsson) | SCReAM v2 (L4S) | working |
 | RoQ (RTP over QUIC) | aioquic datagrams + PyAV | none (unreliable datagrams) | working |
@@ -180,7 +180,14 @@ sudo python3 topology/simple_topology.py --protocol roq    --encoder h264 --bw 1
 sudo python3 topology/simple_topology.py --protocol scream --encoder h264 --bw 10 --delay 10ms --loss 0
 ```
 
-Flags: `--protocol {rtp,quic,roq,scream}`, `--encoder {h264,h265}`, `--bw <Mbit>`, `--delay <ms>`, `--loss <%>`, `--frames <N>`.
+Flags: `--protocol {rtp,quic,roq,scream}`, `--encoder {h264,h265}`, `--bw <Mbit>`, `--delay <ms>`, `--loss <%>`, `--frames <N>`, `--cc-feedback {twcc,rfc8888,none}` (rtp only).
+
+```bash
+# UDP / RTP with the two RTCP congestion-feedback variants (both drive GCC on the server)
+sudo python3 topology/simple_topology.py --protocol rtp --cc-feedback twcc    --bw 10 --delay 10ms
+sudo python3 topology/simple_topology.py --protocol rtp --cc-feedback rfc8888 --bw 10 --delay 10ms
+sudo python3 topology/simple_topology.py --protocol rtp --cc-feedback none    --bw 10 --delay 10ms  # original
+```
 
 Each run writes per-frame metrics to `player/logs/metrics_<protocol>.csv`.
 
@@ -224,6 +231,32 @@ See `ui/README.md` for the dashboard details.
 `config/config.yaml` controls encoder, resolution, frame rate, bitrate, and the
 transport flags. The topology driver and the dashboard write the relevant fields
 for each run, so editing it by hand is only needed for advanced cases.
+
+### UDP/RTP congestion control: RTCP feedback + GCC
+
+The UDP/RTP path has two rate controllers that work together:
+
+1. **Application layer (unchanged):** the server compares the frame it is streaming
+   with the frame ID in the player's Ack/Nack/command messages (`sync` section) and
+   raises or lowers its target bitrate (jump/rise/decrease/fall).
+2. **Network layer (new):** the player sends RTCP congestion feedback, and the server
+   runs GCC (draft-ietf-rmcat-gcc: trendline delay-gradient filter, adaptive-threshold
+   overuse detector, AIMD, loss-based controller) on it (`server/gcc_controller.py`).
+
+The encoder runs at `min(app-layer rate, GCC rate)` and is updated live
+(`x264enc`/`x265enc` `bitrate`). Pick the feedback format with
+`congestion_control.feedback` in `config/config.yaml`, `--cc-feedback`, or the
+`CGREPLAY_CC_FEEDBACK` environment variable:
+
+| `feedback` | RTCP message | How it is produced |
+|------------|--------------|--------------------|
+| `twcc` | RTPFB FMT=15, transport-wide CC (draft-holmer-rmcat-transport-wide-cc-extensions-01) | GStreamer `rtpbin` on both ends; needs GStreamer >= 1.20 (falls back to `none` otherwise) |
+| `rfc8888` | RTPFB FMT=11, CCFB (RFC 8888) | Python: `player/rfc8888_receiver.py` (a small relay timestamps each RTP packet and sends reports), `server/rfc8888.py` (parses them) |
+| `none` | none | original behaviour, application-layer rate control only |
+
+Extra server logs: `server/logs/srv_gcc.csv` (GCC state per feedback) and
+`server/logs/srv_rate_combined.csv` (per frame: app rate, GCC rate, applied rate).
+Feedback uses UDP ports 5011 (server) and 5012/5013 (player), set in `congestion_control`.
 
 ---
 
