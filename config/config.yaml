@@ -129,6 +129,13 @@ congestion_control:
     log_gcc: "./logs/srv_gcc.csv"                    # per-feedback GCC state (server)
     log_rate_combined: "./logs/srv_rate_combined.csv" # frame_id, app, gcc, applied bitrate (server)
 
+# ---------------------------------------------------------------------------------------#
+# RTP-frame <-> video-frame dataset (see README "Dataset"). Server logs every RTP packet it
+# sends + the video frame it carries (srv_rtp.csv, srv_video_frames.csv); the player logs
+# every decoded frame (ply_video_frames.csv). Merge with tools/build_rtp_dataset.py.
+dataset:
+    rtp_tap: True
+
 capturing_options:
     enable_pcap: True
 

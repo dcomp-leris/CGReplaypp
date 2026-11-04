@@ -341,6 +341,135 @@ after *Decode As* UDP 5011 -> RTCP; `udp.dstport == 5003` shows the joystick com
 
 ---
 
+## RTP-frame <-> video-frame dataset
+
+Goal: one row per video frame the server sent, joining what the **server** encoded, what
+the **network** carried (RTP headers at several vantage points) and what the **player**
+decoded (spatial quality + timing), for every game and transport.
+
+### How RTP packets map to video frames (H.264, also H.265)
+
+One video frame (an *access unit*) is carried by **one or more** RTP packets:
+
+* every packet of a frame has the **same RTP timestamp**; the **last** one has **marker = 1**;
+* the sequence number increases by 1 per packet, so gaps = loss, going backwards = reordering;
+* the RTP timestamp uses a 90 kHz clock: `server frame rate = 90000 / Δts` between frames.
+
+Packetization (RFC 6184 for H.264, RFC 7798 for H.265; the dataset logs it per packet in
+`nal` / `inner` / `fu_start` / `fu_end`):
+
+| Packet carries | H.264 NAL type | H.265 | When |
+|---|---|---|---|
+| one whole NAL unit | 1 (slice), 5 (IDR), 6 SEI, 7 SPS, 8 PPS, 9 AUD | 0-40 | small slices, parameter sets |
+| several small NAL units | 24 STAP-A | 48 AP | SPS+PPS together |
+| a fragment of one NAL unit | 28 FU-A (S bit first, E bit last) | 49 FU | any slice bigger than the MTU |
+
+With the default x264 settings (`tune=zerolatency`, 1280x720, GOP 3) an I-frame is
+~20-50 KB → **30-40 packets** and a P-frame ~5-10 KB → **5-10 packets**. Frame 1 carries
+AUD + SPS + PPS + IDR in separate packets with the same timestamp. So "RTP frame" in
+this dataset = *the set of packets sharing one RTP timestamp, ended by the marker bit*,
+and it maps 1:1 to a video frame.
+
+RoQ is different. With SRTP (WebRTC) only the payload is encrypted and the 12-byte RTP
+header stays in clear, so a network device can read it. In RoQ the whole RTP packet
+(header + CGReplay's 16-byte frag header: frame id, index, count, send time + payload) is
+the payload of a QUIC DATAGRAM frame, and QUIC encrypts everything after its short header.
+In a test capture, 0 of 5,960 RoQ datagrams contained the RTP SSRC bytes. **A network
+device cannot read RTP in RoQ**, so the RoQ sender and receiver log the RTP headers
+themselves (vantage points `server_tx`, `player_rx`), and the pcaps give QUIC datagram
+timing/sizes (`other_packets.csv`). To look inside in Wireshark, the receiver writes
+the TLS secrets to `player_logs/quic_keylog.txt`:
+`editcap --inject-secrets tls,player_logs/quic_keylog.txt pcap/h2.pcap h2-decrypted.pcapng`
+(or Wireshark → Preferences → Protocols → TLS → (Pre)-Master-Secret log filename).
+When `tshark`/`editcap` are installed, `tools/build_rtp_dataset.py` does this itself, so
+RoQ also gets RTP rows at the network vantage points (`h2`, `s1-eth1`, `s1-eth2`). RoQ frames are all I-frames (GOP 1) and the RTP
+payload is raw Annex-B, not RFC 6184 packetization.
+
+### What is logged where
+
+| Vantage point | Source | What |
+|---|---|---|
+| `server_tx` | `server/rtp_tap.py` (GStreamer: WebRTC/SCReAM), `roq_sender.py` | every RTP packet as it leaves the server + the frame it carries |
+| `s1-eth1` | tcpdump on the switch port facing the server | RTP after the server-uplink bottleneck |
+| `s1-eth2` | tcpdump on the switch port facing the player | RTP towards the player |
+| `h2` | tcpdump on the player (`player/output.pcap`) | RTP + commands + RTCP as the player NIC sees them |
+| `player_rx` | `roq_receiver.py` (RoQ only) | every RTP datagram the RoQ receiver got |
+| player frames | `cg_gamer1.py` / `roq_receiver.py` → `ply_video_frames.csv` | decode order, receive time, saved PNG |
+
+All Mininet hosts share one clock, so the wall-clock times of all logs and pcaps are
+directly comparable (one-way delay = `vp time − server_tx time`).
+
+The server tags each frame it pushes into GStreamer (`GstBuffer.offset`) and reads the
+RTP timestamp the payloader gives it, writing `server/logs/srv_video_frames.csv`
+(frame id, QR timestamp, push time, RTP timestamp, bitrates). The player side is mapped
+offline: each saved PNG carries the server's QR (`Frame ID`, `rcv_timestamp`), which
+identifies the exact frame instance, even when the application-layer sync logic
+re-streams a frame. `tools/verify_rtp_mapping.py` checks the mapping independently: it
+rebuilds every access unit from a pcap, decodes it and compares the QR with the dataset.
+
+### Collect: one run
+
+```bash
+sudo python3 topology/simple_topology.py --protocol rtp --cc-feedback twcc --game Kombat \
+     --encoder h264 --frames 300 --bw 10 --bn-bw 4 --delay 10ms --skip-metrics
+```
+
+Each run lands in `results/<game>_<transport>_<codec>_<bn>M_<date>/`:
+
+```
+run.json  config.yaml
+server_logs/  srv_rtp.csv  srv_video_frames.csv  srv_QoEMetrics.csv  srv_codec_bitrate.csv
+              srv_frame.csv  srv_gcc.csv  srv_rate_combined.csv   (+ srv_roq_*.csv for RoQ)
+player_logs/  ply_video_frames.csv  ply_frame.csv  ratelog_CG.csv  responsetime_CG.csv
+              (+ ply_rtp.csv, ply_roq_*.csv for RoQ)
+pcap/         s1-eth1.pcap  s1-eth2.pcap  h2.pcap
+received_frames/  host_logs/
+```
+
+Transports: `--protocol rtp --cc-feedback {twcc,rfc8888,none}` (WebRTC-style UDP/RTP),
+`--protocol scream`, `--protocol roq`. Games: `--game {Kombat,Forza,Fortnite}` (the frame
+folders `server/<Game>/` must be downloaded first). `--no-frames` skips copying the PNGs
+(about 1-2 MB each), but then no quality metrics can be computed.
+
+### Collect: every game x transport
+
+```bash
+sudo tools/run_matrix.sh
+# knobs (environment): GAMES, TRANSPORTS, ENCODER, FRAMES, BW, BN_BW, DELAY, JITTER, LOSS, REPEAT
+sudo GAMES="Kombat Forza Fortnite" TRANSPORTS="webrtc-twcc webrtc-rfc8888 webrtc-none scream roq" \
+     BN_BW=4 DELAY=20ms REPEAT=3 tools/run_matrix.sh
+```
+
+It runs each combination, collects it, and finally builds the merged dataset
+`results/dataset_<date>.csv` (using `~/venv/bin/python3`; override with `PY_TOOLS`).
+
+### Merge into the dataset
+
+```bash
+python3 tools/build_rtp_dataset.py results/<run_id> [more runs...] --combined results/all.csv
+python3 tools/verify_rtp_mapping.py results/<run_id>          # optional mapping check (not RoQ)
+```
+
+Needs `pandas opencv-python pyzbar scikit-image` (+ `av` for the verifier, `tshark` to decrypt RoQ pcaps). VMAF needs an
+ffmpeg built with libvmaf (`CGREPLAY_FFMPEG=/path/to/ffmpeg`, otherwise skipped). LPIPS
+needs `pip install lpips torch` (otherwise skipped). `--no-vmaf` / `--no-lpips` turn them off.
+
+Outputs in `results/<run_id>/dataset/`:
+
+| File | One row per | Main columns |
+|---|---|---|
+| `rtp_packets.csv` | RTP packet × vantage point | `vp, wall, seq, ext_seq, rtp_ts, marker, pt, ssrc, pkt_len, payload_len, ext, nal, inner, fu_start, fu_end, slice, keyframe, reordered, duplicate, jitter_ms, frame_id, instance` |
+| `rtp_frames.csv` | RTP frame × vantage point | `pkts, pkts_expected, lost_pkts, complete, reordered_pkts, rtp_bytes, spread_ms, owd_first_ms, owd_last_ms, jitter_ms, iat_ms, fps_arrival, rtp_ts_delta, fps_rtp_ts, kbps_1s, frame_type, nal_types` |
+| `video_frames.csv` | video frame sent by the server | run info (game, transport, codec, link) + server (`frame_id, instance, frame_type, push_wall, server_fps_push, server_fps_rtp, app_bitrate, applied_bitrate`) + `<vp>_*` RTP-frame features for every vantage point + player (`player_decoded, player_decode_idx, player_recv_wall, player_fps, e2e_latency_ms, player_map_method`) + `PSNR, SSIM, VMAF, LPIPS` |
+| `player_frames.csv` | decoded frame | decode order, receive time, mapped instance, mapping method (`qr`, `interp`, `frame_header`) |
+| `commands.csv` | Ack/Nack/command message × vantage point | type, frame id, fps, cps |
+| `other_packets.csv` | non-RTP UDP × vantage point | RTCP (pt/fmt: 205/15 TWCC, 205/11 RFC 8888, 200 SR, 201 RR), QUIC |
+
+Quality is measured against the original game frame (`server/<Game>/<frame_id>.png`,
+resized as the server does), with the QR corner masked identically in both images.
+Frames that never decoded at the player have empty quality columns. Their network rows
+(`h2_lost_pkts > 0`, `h2_complete = 0`) are usually the reason.
+
 ## QoE metric
 
 Perceived quality combines video quality and interaction latency:

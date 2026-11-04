@@ -26,10 +26,13 @@ import struct
 import time
 import yaml
 from fractions import Fraction
+import sys
 import cv2
 import numpy as np
 import qrcode
 import av
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tools"))
+from rtp_parse import PKT_COLS, describe_rtp, pkt_row   # RTP-frame <-> video-frame dataset
 from aioquic.asyncio.server import serve
 from aioquic.quic.configuration import QuicConfiguration
 from aioquic.asyncio.protocol import QuicConnectionProtocol
@@ -87,6 +90,15 @@ RTP_CLOCK    = 90000                        # RTP video clock (Hz)
 
 with open(FRAME_LOG, "w") as f:
     f.write("frame_id,size_bytes,frags,send_time,fps\n")
+
+# Dataset logs (same schema as server/rtp_tap.py). In RoQ the RTP header rides inside an
+# encrypted QUIC DATAGRAM, so the network pcap cannot see it: the endpoints log it here.
+RTP_LOG    = os.path.join(LOG_DIR, "srv_rtp.csv")
+VFRAME_LOG = os.path.join(LOG_DIR, "srv_video_frames.csv")
+_rtp_f = open(RTP_LOG, "w", buffering=1 << 16)
+_rtp_f.write(",".join(PKT_COLS) + "\n")
+_vfr_f = open(VFRAME_LOG, "w", buffering=1)
+_vfr_f.write("instance,frame_id,qr_ts,push_wall,push_perf,pts_ns,rtp_ts,app_bitrate,applied_bitrate,raw_bytes\n")
 with open(EVENT_LOG, "w") as f:
     f.write("timestamp,event,frame_id,size_bytes,fps,ctrl_type,ctrl_count\n")
 
@@ -217,6 +229,9 @@ class RoQSenderProtocol(QuicConnectionProtocol):
             rtp = struct.pack(RTP_FMT, b0, b1, self._seq & 0xFFFF, rtp_ts, RTP_SSRC)
             frag = struct.pack(FRAG_FMT, frame_id, idx, n, send_time)
             self._quic.send_datagram_frame(rtp + frag + chunk)
+            _r = describe_rtp(rtp + frag + chunk[:48], "h265" if IS_H265 else "h264", annexb=True)
+            _r["pkt_len"] = RTP_SIZE + FRAG_SIZE + len(chunk); _r["payload_len"] = FRAG_SIZE + len(chunk)
+            _rtp_f.write(pkt_row("server_tx", time.time(), _r, frame_id, frame_id) + "\n")
             self._seq += 1
         self.transmit()
         return n
@@ -241,7 +256,10 @@ class RoQSenderProtocol(QuicConnectionProtocol):
             pts += 1
 
             send_time = time.perf_counter()
+            _vfr_f.write(f"{frame_id},{frame_id},,{time.time():.6f},{send_time:.6f},{pts},"
+                         f"{(frame_id * RTP_CLOCK) // FPS & 0xFFFFFFFF},{self._bitrate},{self._bitrate},{frame.nbytes}\n")
             n_frags = self._send_frame_datagrams(frame_id, payload, send_time)
+            _rtp_f.flush()
 
             now = time.perf_counter()
             fps = 1.0 / max(now - previous_time, 1e-6)

@@ -354,6 +354,16 @@ def stream_frames(game_name):
         print("Failed to retrieve appsrc element from the pipeline.")
         return
 
+    # RTP-frame <-> video-frame dataset: log every RTP packet sent + the frame it carries
+    rtp_tap = None
+    if (config.get("dataset", {}) or {}).get("rtp_tap", True):
+        from rtp_tap import RtpTap
+        rtp_tap = RtpTap(Gst, pipeline,
+                         codec="h265" if MyvideoEncoder in ("H.265", "H265", "HEVC") else "h264",
+                         rtp_dst_port=int(os.environ.get("CGREPLAY_RTP_PORT", player_port)))
+        if not rtp_tap.ok:
+            rtp_tap = None
+
     # Set the caps for the 'appsrc' element, including FPS and resolution
     appsrc.set_property("caps", Gst.Caps.from_string(f"video/x-raw,format=BGR,width={resolution_width},height={resolution_height},framerate={fps}/1"))
 
@@ -433,12 +443,17 @@ def stream_frames(game_name):
                 f.write(f"{frame_id},{bitrate},{gcc_kbps:.1f},{applied_bitrate}\n")
 
         # Debug: Keep it in mind 
+        if rtp_tap is not None:   # SCReAM sets its own encoder rate -> applied bitrate unknown
+            rtp_tap.frame_pushed(gst_buffer, frame_id, timestamp, bitrate, "" if scream_state else applied_bitrate, len(frame_byte))
         appsrc.emit("push-buffer", gst_buffer)
         # fpscomputing + processing time (Rendering)
         #############################################################################################################
         # Note: This code was added because the first frame was not being sent properly! 
         if frame_id==1:
             #gst_buffer = Gst.Buffer.new_wrapped(frame_byte) #frame.tobytes())
+            if rtp_tap is not None:   # own buffer object so each push carries its own instance tag
+                gst_buffer = Gst.Buffer.new_wrapped(frame_byte)
+                rtp_tap.frame_pushed(gst_buffer, frame_id, timestamp, bitrate, "" if scream_state else applied_bitrate, len(frame_byte))
             appsrc.emit("push-buffer", gst_buffer)
             print('Sending the frame one again')
         #############################################################################################################

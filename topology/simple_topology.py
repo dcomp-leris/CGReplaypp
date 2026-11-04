@@ -192,6 +192,17 @@ def _run_inner(args):
         f"tcpdump -i any -w {PCAP_TMP} '{capture_filter}' "
         f"> /tmp/tcpdump.log 2>&1 & echo $! > /tmp/tcpdump.pid"
     )
+    # Network device = switch s1 (root namespace). s1-eth1 faces the server (packets after
+    # the server-uplink bottleneck), s1-eth2 faces the player. Same filter as the h2 capture.
+    import subprocess as _sp
+    _sw_caps = []
+    for _intf in ("s1-eth1", "s1-eth2"):
+        _p = f"/tmp/cg_{_intf}.pcap"
+        if os.path.exists(_p):
+            os.remove(_p)
+        _sw_caps.append((_intf, _p, _sp.Popen(["tcpdump", "-i", _intf, "-U", "-w", _p, capture_filter],
+                                               stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)))
+    info(f"*** Starting PCAP capture on the switch ports s1-eth1, s1-eth2\n")
     time.sleep(1)  # give tcpdump time to open the capture device
     info(f"    PCAP file after tcpdump start: {h2.cmd(f'ls -la {PCAP_TMP} 2>&1').strip()}\n")
     info(f"    tcpdump PID: {h2.cmd('cat /tmp/tcpdump.pid 2>/dev/null').strip()}\n")
@@ -208,7 +219,14 @@ def _run_inner(args):
     # --- Stop capture: SIGINT → flush + close, then wait for the write to land ---
     info("\n*** Stopping PCAP capture\n")
     h2.cmd("kill -INT $(cat /tmp/tcpdump.pid) 2>/dev/null || true")
+    for _intf, _p, _proc in _sw_caps:
+        _proc.send_signal(2)   # SIGINT -> tcpdump flushes and closes the file
     time.sleep(2)  # wait for kernel buffer flush before copying
+    for _intf, _p, _proc in _sw_caps:
+        try:
+            _proc.wait(timeout=5)
+        except _sp.TimeoutExpired:
+            _proc.kill()
 
     os.makedirs(os.path.dirname(PCAP_DEST) or ".", exist_ok=True)
     h2.cmd(f"cp {PCAP_TMP} {PCAP_DEST}")
@@ -263,12 +281,72 @@ def _run_inner(args):
         else:
             info("[WARN] post_process.py returned non-zero — check received_frames/\n")
 
+    _collect_run(args, _bn_bw, [(i, p) for i, p, _ in _sw_caps])
+
+
+def _collect_run(args, bn_bw, switch_pcaps):
+    """Copy every log, pcap, received frame and the config of this run into
+    results/<game>_<transport>_<codec>_<bn>M_<date>/ for tools/build_rtp_dataset.py."""
+    import json, shutil, glob as _glob, datetime, subprocess as _sp, yaml as _yaml
+    root = os.path.normpath(os.path.join(_SCRIPT_DIR, ".."))
+    with open(_CONFIG_PATH) as _f:
+        cfg = _yaml.safe_load(_f)
+    game = cfg["Running"]["game"]
+    codec = "h265" if cfg["encoding"]["name"].strip().upper() in ("H.265", "H265", "HEVC") else "h264"
+    transport = args.protocol
+    if args.protocol == "rtp":
+        fb = getattr(args, "cc_feedback", None) or (cfg.get("congestion_control", {}) or {}).get("feedback", "none")
+        transport = f"webrtc-{fb}"
+    run_id = f"{game}_{transport}_{codec}_{bn_bw:g}M_{datetime.datetime.now():%Y%m%d-%H%M%S}"
+    out = os.path.join(root, getattr(args, "results_dir", "results") or "results", run_id)
+    os.makedirs(out, exist_ok=True)
+    for sub, src in (("server_logs", os.path.join(SERVER_DIR, "logs")),
+                     ("player_logs", os.path.join(PLAYER_DIR, "logs"))):
+        os.makedirs(os.path.join(out, sub), exist_ok=True)
+        for fp in _glob.glob(os.path.join(src, "*.csv")) + _glob.glob(os.path.join(src, "*keylog*.txt")):
+            shutil.copy(fp, os.path.join(out, sub))
+    os.makedirs(os.path.join(out, "pcap"), exist_ok=True)
+    if os.path.exists(PCAP_DEST):
+        shutil.copy(PCAP_DEST, os.path.join(out, "pcap", "h2.pcap"))
+    for intf, p in switch_pcaps:
+        if os.path.exists(p):
+            shutil.copy(p, os.path.join(out, "pcap", f"{intf}.pcap"))
+    os.makedirs(os.path.join(out, "host_logs"), exist_ok=True)
+    for fp in _glob.glob("/tmp/h[12]_*.log"):
+        shutil.copy(fp, os.path.join(out, "host_logs"))
+    if not getattr(args, "no_frames", False):
+        src = os.path.join(PLAYER_DIR, "received_frames")
+        if os.path.isdir(src):
+            shutil.copytree(src, os.path.join(out, "received_frames"), dirs_exist_ok=True)
+    shutil.copy(_CONFIG_PATH, os.path.join(out, "config.yaml"))
+    try:
+        commit = _sp.run(["git", "-C", root, "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+    except Exception:
+        commit = ""
+    meta = {"run_id": run_id, "game": game, "protocol": args.protocol, "transport": transport,
+            "codec": codec, "bw_mbps": args.bw, "bottleneck_mbps": bn_bw, "delay": args.delay,
+            "jitter": getattr(args, "jitter", None), "loss_pct": args.loss, "frames": args.frames,
+            "fps": cfg["encoding"]["fps"], "resolution": cfg["encoding"]["resolution"],
+            "reference_frames": os.path.join(root, "server", cfg[game]["frames"].lstrip("./")),
+            "git_commit": commit, "date": datetime.datetime.now().isoformat(timespec="seconds"),
+            "vantage_points": {"server_tx": "server/rtp_tap.py (or roq_sender) on h1",
+                               "s1-eth1": "switch port facing the server",
+                               "s1-eth2": "switch port facing the player",
+                               "h2": "player NIC", "player_rx": "roq_receiver (RoQ only)"}}
+    with open(os.path.join(out, "run.json"), "w") as f:
+        json.dump(meta, f, indent=2)
+    if os.environ.get("SUDO_UID"):                 # results belong to the real user, not root
+        _sp.run(["chown", "-R", f"{os.environ['SUDO_UID']}:{os.environ.get('SUDO_GID', os.environ['SUDO_UID'])}", out])
+    info(f"*** Run collected in {out}\n")
+    info(f"    Build the dataset: python3 tools/build_rtp_dataset.py {out}\n")
+
 
 def _run_quic(h1, h2, args):
     """Launch CGReplay main scripts with QUIC transport."""
     _config = os.path.join(_SCRIPT_DIR, "../config/config.yaml")
     os.system(f"sed -i 's/QUIC: False/QUIC: True/' {_config}")
     os.system(f"sed -i 's/SCReAM: True/SCReAM: False/' {_config}")
+    os.system(f"sed -i 's/RoQ: True/RoQ: False/' {_config}")
 
     info("*** Launching CGReplay server (QUIC mode) on h1...\n")
     h1.cmd(
@@ -345,6 +423,7 @@ def _run_rtp(h1, h2, args):
     _config = os.path.join(_SCRIPT_DIR, "../config/config.yaml")
     os.system(f"sed -i 's/QUIC: True/QUIC: False/' {_config}")
     os.system(f"sed -i 's/SCReAM: True/SCReAM: False/' {_config}")
+    os.system(f"sed -i 's/RoQ: True/RoQ: False/' {_config}")     # a stale RoQ flag would hijack the run
 
     info("*** Launching RTP server on h1...\n")
     h1.cmd(
@@ -399,6 +478,7 @@ def _run_scream(h1, h2, args):
     # Temporarily enable SCReAM and disable QUIC in config
     _config = os.path.join(_SCRIPT_DIR, "../config/config.yaml")
     os.system(f"sed -i 's/QUIC: True/QUIC: False/' {_config}")
+    os.system(f"sed -i 's/RoQ: True/RoQ: False/' {_config}")     # a stale RoQ flag would hijack the run
     os.system(f"sed -i 's/SCReAM: False/SCReAM: True/' {_config}")
 
     info("*** Launching SCReAM server on h1...\n")
@@ -417,8 +497,8 @@ def _run_scream(h1, h2, args):
     info("*** Streaming in progress — waiting for completion...\n")
     _wait_for_completion(h2, "/tmp/h2_scream.log", "RTP streaming complete", timeout=300)
 
-    # Restore config
-    os.system(f"sed -i 's/QUIC: False/QUIC: True/' {_config}")
+    # Restore config: leave all transport flags off (it used to set QUIC: True here,
+    # which turned every later manual run into a QUIC run)
     os.system(f"sed -i 's/SCReAM: True/SCReAM: False/' {_config}")
 
     info("\n--- h1 server log (tail) ---\n")
@@ -506,6 +586,14 @@ if __name__ == "__main__":
         "--cc-feedback", dest="cc_feedback", choices=["twcc", "rfc8888", "none"], default=None,
         help="rtp only: RTCP congestion feedback driving GCC on top of the app-layer "
              "rate control (default: congestion_control.feedback in config)"
+    )
+    parser.add_argument(
+        "--results-dir", dest="results_dir", default="results",
+        help="Where each run's logs/pcaps/frames are collected (default: results/)"
+    )
+    parser.add_argument(
+        "--no-frames", dest="no_frames", action="store_true",
+        help="Do not copy received_frames/ into the results folder (saves disk)"
     )
     parser.add_argument(
         "--cli", action="store_true",

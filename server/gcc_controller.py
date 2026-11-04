@@ -259,8 +259,10 @@ class GCCController:
                 self.last_decrease = now
             self.rate_state = "hold"
 
-        if self.acked_bps is not None:           # never run far ahead of what arrives
-            rate = min(rate, 1.5 * self.acked_bps + 10000.0)
+        if self.acked_bps is not None and rate > self.delay_bps:
+            # do not INCREASE far beyond what actually arrives (application-limited);
+            # this cap never lowers the estimate (libwebrtc AimdRateControl behaviour)
+            rate = min(rate, max(self.delay_bps, 1.5 * self.acked_bps + 10000.0))
         self.delay_bps = min(max(rate, self.min_bps), self.max_bps)
 
     # -- loss-based ----------------------------------------------------------
@@ -279,9 +281,10 @@ class GCCController:
                 self.loss_bps *= (1.0 - 0.5 * p)
                 self.last_loss_decrease = now
         elif p < 0.02:
-            self.loss_bps *= math.pow(1.08, dt)  # +8 %/s while loss is low
-        if self.acked_bps is not None:           # never run far ahead of what arrives
-            self.loss_bps = min(self.loss_bps, 1.5 * self.acked_bps + 10000.0)
+            inc = self.loss_bps * math.pow(1.08, dt)   # +8 %/s while loss is low
+            if self.acked_bps is not None:             # same application-limited guard
+                inc = min(inc, max(self.loss_bps, 1.5 * self.acked_bps + 10000.0))
+            self.loss_bps = inc
         self.loss_bps = min(max(self.loss_bps, self.min_bps), self.max_bps)
         self._loss_recv = self._loss_lost = 0
 

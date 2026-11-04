@@ -331,6 +331,11 @@ def _watchdog():
 _threading.Thread(target=_watchdog, daemon=True).start()
 
 # Open the video stream using OpenCV and GStreamer
+# RTP-frame <-> video-frame dataset: one row per decoded frame (decode order, time, saved PNG).
+# The true server frame of each saved PNG is read offline from its QR (tools/build_rtp_dataset.py).
+_vf_log = open(os.path.join(logs_dir or ".", "ply_video_frames.csv"), "w", buffering=1)
+_vf_log.write("decode_idx,recv_wall,recv_perf,saved_png,frame_id\n")
+
 cap = cv2.VideoCapture(gstreamer_pipeline, cv2.CAP_GSTREAMER)
 
 if not cap.isOpened():
@@ -374,6 +379,7 @@ else:
     # Test frame reading
     print("Testing frame capture...")
     ret, test_frame = cap.read()
+    _vf_log.write(f"0,{time.time():.6f},{time.perf_counter():.6f},,\n")   # decoded, not saved
     if ret and test_frame is not None:
         print(f"✅ Successfully captured test frame: {test_frame.shape}")
     else:
@@ -410,6 +416,7 @@ while True:
 
     # Use frame_counter as frame_id (QR decoding skipped — too slow for RTP/SCReAM path)
     frame_id = frame_counter
+    _vf_log.write(f"{my_try_counter + 1},{time.time() - (time.perf_counter() - frm_rcv):.6f},{frm_rcv:.6f},{received_frames}/{frame_id:04d}.png,\n")
     qr_data = None
     current_fps = 1/(frm_rcv-frm_previoustime)
     frm_previoustime = frm_rcv
