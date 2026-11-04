@@ -226,6 +226,124 @@ See `ui/README.md` for the dashboard details.
 
 ---
 
+## Guideline: run WebRTC and RoQ (and SCReAM) and collect the dataset
+
+A step-by-step recipe for running the transports and getting logs + pcaps + the merged
+RTP-frame / video-frame dataset. Details and column lists are in
+[RTP-frame <-> video-frame dataset](#rtp-frame---video-frame-dataset).
+
+| Transport | `--protocol` | Extra flag | Status |
+|---|---|---|---|
+| WebRTC-style UDP/RTP + GCC on RTCP TWCC | `rtp` | `--cc-feedback twcc` | tested |
+| WebRTC-style UDP/RTP + GCC on RTCP RFC 8888 | `rtp` | `--cc-feedback rfc8888` | tested |
+| WebRTC-style UDP/RTP, app-layer rate control only | `rtp` | `--cc-feedback none` | tested |
+| RoQ (RTP over QUIC datagrams) | `roq` | – | tested |
+| SCReAM v2 | `scream` | – | **not validated yet** (needs the Ericsson `gstscream` build; logging and dataset support are in place) |
+
+### Step 0 — once per machine
+
+```bash
+# system Python (GStreamer path: WebRTC, SCReAM) — see Install, step 3
+sudo apt-get install -y python3-gi gir1.2-gstreamer-1.0 gstreamer1.0-plugins-{base,good,bad,ugly} gstreamer1.0-libav tcpdump
+gst-inspect-1.0 rtphdrexttwcc        # must exist for --cc-feedback twcc (GStreamer >= 1.20)
+
+# venv (RoQ + tools) — see Install, step 4
+~/venv/bin/pip install aioquic av opencv-python numpy pandas pyzbar scikit-image PyYAML qrcode
+
+# optional
+sudo apt-get install -y tshark       # decrypt RoQ pcaps -> RTP visible at the network vantage points
+export CGREPLAY_FFMPEG=/path/to/ffmpeg-with-libvmaf   # VMAF (otherwise skipped)
+~/venv/bin/pip install lpips torch                    # LPIPS (otherwise skipped)
+```
+
+RoQ needs a TLS certificate at `protocols.quic_cert` / `quic_key` in `config/config.yaml`
+(default `../../rtp_stream_creation/server.pem|key`, relative to `server/`):
+
+```bash
+mkdir -p ../rtp_stream_creation && openssl req -x509 -newkey rsa:2048 -nodes -days 365 \
+  -keyout ../rtp_stream_creation/server.key -out ../rtp_stream_creation/server.pem -subj "/CN=cgreplay"
+```
+
+### Step 1 — put the game frames in place
+
+`server/Kombat/`, `server/Forza/`, `server/Fortnite/` (PNG frames `0001.png ...`, see
+[Datasets](#datasets)); the sync files are already in `server/syncs/` and `player/syncs/`.
+Pick the game per run with `--game`.
+
+### Step 2 — run one experiment
+
+```bash
+cd CGReplaypp
+# WebRTC-style, GCC on TWCC feedback
+sudo python3 topology/simple_topology.py --protocol rtp --cc-feedback twcc    --game Kombat \
+     --encoder h264 --frames 300 --bw 10 --bn-bw 4 --delay 10ms --loss 0 --skip-metrics
+# WebRTC-style, GCC on RFC 8888 feedback
+sudo python3 topology/simple_topology.py --protocol rtp --cc-feedback rfc8888 --game Kombat \
+     --encoder h264 --frames 300 --bw 10 --bn-bw 4 --delay 10ms --loss 0 --skip-metrics
+# WebRTC-style, application-layer rate control only (original behaviour)
+sudo python3 topology/simple_topology.py --protocol rtp --cc-feedback none    --game Kombat \
+     --encoder h264 --frames 300 --bw 10 --bn-bw 4 --delay 10ms --loss 0 --skip-metrics
+# RoQ
+sudo python3 topology/simple_topology.py --protocol roq --game Kombat \
+     --encoder h264 --frames 300 --bw 10 --bn-bw 4 --delay 10ms --loss 0 --skip-metrics
+# SCReAM (not validated yet)
+# sudo python3 topology/simple_topology.py --protocol scream --game Kombat --frames 300 --bw 10 --bn-bw 4 --delay 10ms --skip-metrics
+```
+
+* `--bn-bw` = bottleneck on the server uplink (what congestion control reacts to), `--bw` = access link,
+  `--jitter 5ms` adds jitter, `--loss` is in %.
+* `--skip-metrics` skips the old `post_process.py` step; the dataset builder (step 4) computes quality itself.
+* `--no-frames` does not keep the received PNGs (saves ~1-2 MB/frame, but then no quality metrics).
+* After an aborted run: `sudo mn -c` and check that `SCReAM`, `QUIC` and `RoQ` are `False` in `config/config.yaml`.
+
+### Step 3 — what one run produces
+
+The run is collected in `results/<game>_<transport>_<codec>_<bn>M_<date>/`
+(e.g. `results/Kombat_webrtc-twcc_h264_4M_20261103-201500/`):
+
+| Folder / file | Content |
+|---|---|
+| `run.json`, `config.yaml` | experiment parameters, exact config, git commit |
+| `server_logs/srv_rtp.csv` | every RTP packet the server sent (seq, RTP ts, marker, sizes, NAL/FU info, frame id) |
+| `server_logs/srv_video_frames.csv` | every frame the server pushed: frame id, QR timestamp, push time, RTP ts, app/applied bitrate |
+| `server_logs/srv_QoEMetrics.csv`, `srv_codec_bitrate.csv`, `srv_frame.csv` | application-layer sync / rate-control logs (frames <-> commands) |
+| `server_logs/srv_gcc.csv`, `srv_rate_combined.csv` | GCC state per feedback, app vs GCC vs applied bitrate (WebRTC twcc / rfc8888) |
+| `player_logs/ply_video_frames.csv` | every decoded frame: decode order, receive time, saved PNG |
+| `player_logs/ratelog_*.csv`, `responsetime_CG.csv`, `ply_*frame.csv` | player fps/cps, frame -> command response time |
+| `player_logs/ply_rtp.csv`, `quic_keylog.txt` | RoQ only: every RTP datagram received, QUIC TLS secrets |
+| `pcap/s1-eth1.pcap`, `pcap/s1-eth2.pcap` | network device: switch port facing the server / the player |
+| `pcap/h2.pcap` | player NIC: video, commands, RTCP feedback (WebRTC) or QUIC (RoQ) |
+| `received_frames/` | decoded frames (PNG) for the quality metrics |
+
+### Step 4 — build the dataset
+
+```bash
+~/venv/bin/python3 tools/build_rtp_dataset.py results/Kombat_webrtc-twcc_h264_4M_* \
+     results/Kombat_roq_h264_4M_* --combined results/kombat.csv
+~/venv/bin/python3 tools/verify_rtp_mapping.py results/Kombat_webrtc-twcc_h264_4M_*   # optional check (WebRTC/SCReAM)
+```
+
+Per run it writes `dataset/rtp_packets.csv`, `rtp_frames.csv`, `video_frames.csv`,
+`player_frames.csv`, `commands.csv`, `other_packets.csv`; `--combined` concatenates the
+`video_frames.csv` of all runs (one row per server video frame, with run, game and
+transport columns) for the analysis of network features vs receiver-side quality.
+For RoQ, install `tshark` so the builder can decrypt the pcaps with `quic_keylog.txt`;
+without it RoQ RTP comes only from the endpoint logs (`server_tx`, `player_rx`).
+
+### Step 5 — every game x transport in one go
+
+```bash
+sudo GAMES="Kombat Forza Fortnite" TRANSPORTS="webrtc-twcc webrtc-rfc8888 webrtc-none roq" \
+     FRAMES=300 BW=10 BN_BW=4 DELAY=10ms LOSS=0 REPEAT=1 tools/run_matrix.sh
+```
+
+It runs every combination, collects each run as in step 3 and finishes with
+`results/dataset_<date>.csv` (all runs merged). Add `scream` to `TRANSPORTS` once SCReAM is
+validated. Other knobs: `ENCODER=h265`, `JITTER=5ms`, `NO_FRAMES=1`, `RESULTS=<dir>`,
+`PY_TOOLS=<python with pandas/opencv/pyzbar>`.
+
+---
+
 ## Configuration
 
 `config/config.yaml` controls encoder, resolution, frame rate, bitrate, and the
