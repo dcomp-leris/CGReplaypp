@@ -22,9 +22,12 @@ import time
 import subprocess
 import glob
 import yaml
+import sys
 import cv2
 import numpy as np
 import pandas as pd
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tools"))
+from rtp_parse import PKT_COLS, describe_rtp, pkt_row   # RTP-frame <-> video-frame dataset
 import av
 from pyzbar import pyzbar
 from aioquic.asyncio import connect
@@ -90,6 +93,14 @@ with open(EVENT_LOG, "w") as f:
     f.write("timestamp,event,frame_id,size_bytes,fps,cmd_count,response_time_ms\n")
 with open(RT_LOG, "w") as f:
     f.write("frame_id,frame_timestamp,cmd_timestamp\n")
+
+# Dataset logs: every RTP datagram received (RoQ hides RTP from the network inside QUIC)
+# and every decoded frame (true frame id from the frag header).
+_DEC_CODEC_NAME = "h265" if DEC_CODEC == "hevc" else "h264"
+_rtp_f = open(os.path.join(LOG_DIR, "ply_rtp.csv"), "w", buffering=1 << 16)
+_rtp_f.write(",".join(PKT_COLS) + "\n")
+_vf_f = open(os.path.join(LOG_DIR, "ply_video_frames.csv"), "w", buffering=1)
+_vf_f.write("decode_idx,recv_wall,recv_perf,saved_png,frame_id\n")
 
 # ---------------------------------------------------------------------------
 # Sync file loader — same format as cg_gamer1.py / quic_receiver.py
@@ -215,6 +226,10 @@ class RoQReceiverProtocol(QuicConnectionProtocol):
         frame_id, frag_index, frag_count, send_time = struct.unpack(
             FRAG_FMT, data[RTP_SIZE:HDR_SIZE])
         chunk = data[HDR_SIZE:]
+        _r = describe_rtp(data[:HDR_SIZE + 48], _DEC_CODEC_NAME, annexb=True)
+        if _r is not None:
+            _r["pkt_len"] = len(data); _r["payload_len"] = len(data) - RTP_SIZE
+            _rtp_f.write(pkt_row("player_rx", time.time(), _r, frame_id, frame_id) + "\n")
 
         if frame_id in self._delivered:
             return  # duplicate / late fragment of an already-decoded frame
@@ -278,6 +293,9 @@ class RoQReceiverProtocol(QuicConnectionProtocol):
 
         with open(FRAME_LOG, "a") as f:
             f.write(f"{frame_id},{len(payload)},{frame_recv_time:.6f},{self._current_fps:.2f}\n")
+        _vf_f.write(f"{self._frame_count + 1},{time.time() - (time.perf_counter() - frame_recv_time):.6f},"
+                    f"{frame_recv_time:.6f},{_final},{frame_id}\n")
+        _rtp_f.flush()
 
         self._frame_count += 1
         n_cmds = 0
@@ -350,6 +368,10 @@ async def main():
     configuration.verify_mode = False          # self-signed cert in dev
     configuration.alpn_protocols = ["cgroq"]
     configuration.max_datagram_frame_size = 65536   # enable QUIC DATAGRAM extension
+    # QUIC encrypts the whole DATAGRAM payload, RTP header included (unlike SRTP, which
+    # leaves the 12-byte RTP header in clear). Writing the TLS secrets lets Wireshark /
+    # editcap decrypt the pcaps and show the RTP inside: logs/quic_keylog.txt (NSS format).
+    configuration.secrets_log_file = open(os.path.join(LOG_DIR, "quic_keylog.txt"), "a")
 
     print(f"[RoQ] Connecting to {SERVER_IP}:{QUIC_PORT}")
     print(f"[RoQ] Game={GAME}  stop_frame={STOP_FRAME}  sync={SYNC_FILE}  commands={len(sync_df)}")
