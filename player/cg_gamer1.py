@@ -319,6 +319,12 @@ else:
 import threading as _threading, os as _os
 _IDLE_TIMEOUT = 20.0  # seconds with no new frame → assume the stream ended
 _HARD_CAP     = (stop_frm_number / config["encoding"]["fps"]) * 12 + 60
+# Long looping runs (CGREPLAY_LOOP_DURATION_S) outlast the frame-count cap above,
+# so raise the absolute ceiling to the loop duration plus margin.
+_loop_dur_s   = float(_os.environ.get("CGREPLAY_LOOP_DURATION_S", 0) or 0)
+if _loop_dur_s > 0:
+    _HARD_CAP = max(_HARD_CAP, _loop_dur_s + 45)
+    _IDLE_TIMEOUT = 40.0   # survive a congestion stall without ending the run early
 _activity     = [time.perf_counter()]   # updated in the receive loop per frame
 _start_ts     = time.perf_counter()
 def _watchdog():
@@ -441,8 +447,8 @@ while True:
             #log_frame_buffer.append(f"{frame_id},{current_fps},{0}\n")
             #if len(log_frame_buffer) >= buffer_size: open(frame_log, "a").writelines(log_frame_buffer); log_frame_buffer.clear()
 
-            if frame_id == stop_frm_number:
-                break
+            if frame_id == stop_frm_number and _loop_dur_s <= 0:
+                break   # looping runs keep going until the server stops (EOS) / idle watchdog
         else:
 
             pass
@@ -556,9 +562,9 @@ while True:
     my_try_counter = my_try_counter + 1
     print(f'Received Frame # is: {my_try_counter}')
 
-    if my_try_counter >= stop_frm_number:
+    if my_try_counter >= stop_frm_number and _loop_dur_s <= 0:
         print("RTP streaming complete.")
-        break
+        break   # looping runs end on server EOS / idle watchdog, not a frame count
 
     # Write any remaining in the log
     if log_frame_buffer:

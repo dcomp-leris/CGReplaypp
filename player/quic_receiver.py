@@ -43,6 +43,9 @@ with open(CONFIG_PATH) as f:
 
 GAME            = config["Running"]["game"]
 STOP_FRAME      = config["Running"]["stop_frm_number"]
+# CGREPLAY_LOOP_DURATION_S > 0: the server replays to a wall-clock budget, so the receiver
+# must not stop at the last frame id; it finishes from the budget watchdog in main().
+_LOOP_DUR       = float(os.environ.get("CGREPLAY_LOOP_DURATION_S", 0) or 0)
 SERVER_IP       = config["server"]["server_IP"]
 QUIC_PORT       = config["protocols"].get("quic_port", 4433)
 PLAYER_IP       = config["gamer"]["player_IP"]
@@ -134,7 +137,7 @@ def read_qr(frame: np.ndarray) -> tuple[int, str | None]:
 # inside Mininet; the system's GTK build does (same path RTP/SCReAM use). The
 # receiver just writes frames to RECV_DIR and the viewer shows the newest one.
 # ---------------------------------------------------------------------------
-SYS_PY      = "/usr/bin/python3"
+SYS_PY      = "/home/hugo/CGSynth/CGReplaypp/.venv/bin/python3"
 VIEWER_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "frame_viewer.py")
 STOP_FILE   = "/tmp/quic_viewer_stop"
 
@@ -259,7 +262,7 @@ class QUICReceiverProtocol(QuicConnectionProtocol):
 
         self._frame_counter += 1
 
-        if frame_id >= STOP_FRAME - 1:
+        if frame_id >= STOP_FRAME - 1 and _LOOP_DUR <= 0:   # stop at the last frame only when NOT looping
             duration = time.perf_counter() - self._session_start
             avg_fps = self._frame_count / max(duration, 1e-6)
             print(f"\n[SUMMARY] frames={self._frame_count}  commands={self._cmd_count}"
@@ -302,7 +305,15 @@ async def main():
         configuration=configuration,
         create_protocol=QUICReceiverProtocol,
     ) as protocol:
-        await protocol._done.wait()
+        if _LOOP_DUR > 0:
+            # Looping: the server stops at its wall-clock budget and nothing sets _done by
+            # frame id, so finish a little after the budget (or earlier if the link drops).
+            try:
+                await asyncio.wait_for(protocol._done.wait(), timeout=_LOOP_DUR + 25)
+            except asyncio.TimeoutError:
+                print(f"[QUIC] Loop budget {_LOOP_DUR:.0f}s elapsed — finishing.")
+        else:
+            await protocol._done.wait()
 
     print("[QUIC] Receiver finished.")
 

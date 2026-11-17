@@ -57,7 +57,7 @@ METRICS_DIR  = CGREPLAY_DIR / "player" / "logs"
 KOMBAT_DIR   = CGREPLAY_DIR / "server" / "Kombat"
 RECV_DIR     = CGREPLAY_DIR / "player" / "received_frames"
 CONFIG_YAML  = CGREPLAY_DIR / "config" / "config.yaml"
-SYS_PYTHON   = "/usr/bin/python3"   # interpreter that has Mininet
+SYS_PYTHON   = "/home/hugo/CGSynth/CGReplaypp/.venv/bin/python3"   # interpreter that has Mininet
 
 _PROTO_MAP = {
     "UDP/RTP (WebRTC)": "rtp", "UDP/RTP": "rtp", "UDP": "rtp", "RTP": "rtp",

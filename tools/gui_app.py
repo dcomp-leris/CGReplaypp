@@ -18,7 +18,7 @@ Two parts, per Alireza's spec:
 Already-run protocols stay on the charts so you can compare them.
 
 Run (must be root so it can drive Mininet without a sudo password prompt):
-    sudo -E /home/hugo/venv/bin/streamlit run tools/gui_app.py
+    sudo -E /home/hugo/CGSynth/CGReplaypp/.venv/bin/streamlit run tools/gui_app.py
 
 Then open the URL Streamlit prints (http://localhost:8501).
 """
@@ -37,7 +37,7 @@ import yaml
 ROOT     = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LOGS_DIR = os.path.join(ROOT, "player", "logs")
 TOPOLOGY = os.path.join(ROOT, "topology", "simple_topology.py")
-SYS_PY   = "/usr/bin/python3"   # Mininet lives in the system interpreter
+SYS_PY   = "/home/hugo/CGSynth/CGReplaypp/.venv/bin/python3"   # Mininet lives in the system interpreter
 
 with open(os.path.join(ROOT, "config", "config.yaml")) as _f:
     _cfg = yaml.safe_load(_f)
@@ -156,7 +156,7 @@ if not is_root:
     st.warning(
         "Start is disabled: launch the app as root so it can drive Mininet "
         "without a password prompt:\n\n"
-        "`sudo -E /home/hugo/venv/bin/streamlit run tools/gui_app.py`",
+        "`sudo -E /home/hugo/CGSynth/CGReplaypp/.venv/bin/streamlit run tools/gui_app.py`",
         icon="⚠️",
     )
 

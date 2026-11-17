@@ -380,8 +380,24 @@ def stream_frames(game_name):
     applied_bitrate = bitrate   # what the encoder is actually running at (TWCC/GCC mode)
 
     idx = 0
-    while idx < len(png_files):
-        #if idx == stop_frm_number: # stop after streaming 'stop_frm_number' frames! 
+    # Deterministic frame looping for long (e.g. 120 s) congestion runs: when
+    # CGREPLAY_LOOP_DURATION_S > 0 the dataset is replayed end-to-end until that
+    # many wall-clock seconds elapse. frame_id cycles 1..N each pass while the
+    # rtp_tap `instance` keeps incrementing, so every push stays unique in the
+    # dataset (the merge keys on (instance, frame_id)). Default 0 = single pass
+    # (unchanged behaviour).
+    _loop_dur = float(os.environ.get("CGREPLAY_LOOP_DURATION_S", 0) or 0)
+    _loop_t0 = time.time()
+    while idx < len(png_files) or _loop_dur > 0:
+        if _loop_dur > 0 and (time.time() - _loop_t0) >= _loop_dur:
+            break                            # wall-clock budget spent: stops mid-dataset too,
+                                             # so a long (e.g. 9000-frame) set ends on time
+        if idx >= len(png_files):
+            if _loop_dur > 0 and (time.time() - _loop_t0) < _loop_dur:
+                idx = 0                      # replay the dataset again (short sets)
+            else:
+                break
+        #if idx == stop_frm_number: # stop after streaming 'stop_frm_number' frames!
             #break
         file = png_files[idx]  # Access the file by index
         print("Log hint==>>>",file, idx)
@@ -396,7 +412,7 @@ def stream_frames(game_name):
         frame_id = int(file.split('.')[0])  # Extract frame ID from the filename
         print("Debug:==>", frame_id)
 
-        if frame_id == stop_frm_number: # stop after streaming 'stop_frm_number' frames! 
+        if frame_id == stop_frm_number and _loop_dur <= 0: # stop at stop_frm_number only when NOT looping
             break
 
         if frame is None:

@@ -181,6 +181,9 @@ class RoQSenderProtocol(QuicConnectionProtocol):
         self._frame_count = 0
         self._ctrl_count = 0
         self._seq = 0                       # RTP sequence number (rolls at 16 bits)
+        self._tx_index = 0                  # monotonic frame counter = instance; keeps
+                                            # rtp_ts unique across loop passes so the merge
+                                            # (keyed on rtp_ts) does not collapse repeats
         self._session_start = time.perf_counter()
         self._enc = create_video_encoder(self._bitrate)
         print(f"[RoQ] video encoder: {'H.265/libx265' if IS_H265 else 'H.264/libx264'}")
@@ -217,9 +220,11 @@ class RoQSenderProtocol(QuicConnectionProtocol):
             if self._streaming_task:
                 self._streaming_task.cancel()
 
-    def _send_frame_datagrams(self, frame_id: int, payload: bytes, send_time: float):
-        """Packetise one encoded frame into RTP-over-QUIC datagrams."""
-        rtp_ts = (frame_id * RTP_CLOCK) // FPS & 0xFFFFFFFF
+    def _send_frame_datagrams(self, frame_id: int, inst: int, rtp_ts: int, payload: bytes, send_time: float):
+        """Packetise one encoded frame into RTP-over-QUIC datagrams.
+        frame_id is the dataset id (1..N, repeats across loop passes, carried in the
+        frag header + QR for player mapping); inst is the monotonic send index = the
+        merge's instance; rtp_ts is monotonic so pcap packets key uniquely per sent frame."""
         n = max(1, (len(payload) + FRAG_PAYLOAD - 1) // FRAG_PAYLOAD)
         for idx in range(n):
             chunk = payload[idx * FRAG_PAYLOAD:(idx + 1) * FRAG_PAYLOAD]
@@ -231,7 +236,7 @@ class RoQSenderProtocol(QuicConnectionProtocol):
             self._quic.send_datagram_frame(rtp + frag + chunk)
             _r = describe_rtp(rtp + frag + chunk[:48], "h265" if IS_H265 else "h264", annexb=True)
             _r["pkt_len"] = RTP_SIZE + FRAG_SIZE + len(chunk); _r["payload_len"] = FRAG_SIZE + len(chunk)
-            _rtp_f.write(pkt_row("server_tx", time.time(), _r, frame_id, frame_id) + "\n")
+            _rtp_f.write(pkt_row("server_tx", time.time(), _r, frame_id, inst) + "\n")
             self._seq += 1
         self.transmit()
         return n
@@ -240,41 +245,65 @@ class RoQSenderProtocol(QuicConnectionProtocol):
         frames = list_frames()
         previous_time = time.perf_counter()
         pts = 0
+        # CGREPLAY_LOOP_DURATION_S > 0: replay the dataset end-to-end until that many
+        # wall-clock seconds elapse (the 120 s congestion runs). 0 = single pass, the
+        # original behaviour. frame_id cycles 1..N each pass (carried in the QR + frag
+        # header for player mapping); self._tx_index (= instance) and rtp_ts advance
+        # monotonically so the merge, which keys pcap packets on rtp_ts, never collapses
+        # repeated frame ids.
+        _loop_dur = float(os.environ.get("CGREPLAY_LOOP_DURATION_S", 0) or 0)
+        _loop_t0 = time.time()
 
-        for path in frames:
-            frame_id = int(os.path.basename(path).split(".")[0])
-            if frame_id >= STOP_FRAME:
-                break
+        while True:
+            for path in frames:
+                if _loop_dur > 0 and (time.time() - _loop_t0) >= _loop_dur:
+                    break                    # wall-clock budget spent mid-pass (long datasets)
+                frame_id = int(os.path.basename(path).split(".")[0])
+                if frame_id >= STOP_FRAME and _loop_dur <= 0:   # stop at STOP_FRAME only when NOT looping
+                    break
 
-            # Read + preprocess
-            frame = cv2.imread(path)
-            if frame is None:
+                # Read + preprocess
+                frame = cv2.imread(path)
+                if frame is None:
+                    continue
+                frame = cv2.resize(frame, (WIDTH, HEIGHT), interpolation=cv2.INTER_AREA)
+                frame = embed_qr(frame, frame_id, self._bitrate)
+                payload = encode_frame(frame, self._enc, pts)
+                pts += 1
+
+                self._tx_index += 1
+                inst = self._tx_index
+                send_time = time.perf_counter()
+                # rtp_ts tracks REAL elapsed time (not inst/FPS): RoQ sends well below the
+                # config fps, so an index-based timestamp drifts from wall clock and the
+                # merge's wall-minus-rtp_ts one-way delay accumulates that drift (~10 s over
+                # a 120 s run). Time-based keeps rtp_ts unique+monotonic AND aligned to wall,
+                # so OWD is the true network delay.
+                rtp_ts = int((send_time - self._session_start) * RTP_CLOCK) & 0xFFFFFFFF
+                _vfr_f.write(f"{inst},{frame_id},,{time.time():.6f},{send_time:.6f},{pts},"
+                             f"{rtp_ts},{self._bitrate},{self._bitrate},{frame.nbytes}\n")
+                n_frags = self._send_frame_datagrams(frame_id, inst, rtp_ts, payload, send_time)
+                _rtp_f.flush()
+
+                now = time.perf_counter()
+                fps = 1.0 / max(now - previous_time, 1e-6)
+                previous_time = now
+
+                with open(FRAME_LOG, "a") as f:
+                    f.write(f"{frame_id},{len(payload)},{n_frags},{now:.6f},{fps:.2f}\n")
+                with open(EVENT_LOG, "a") as f:
+                    f.write(f"{now:.6f},TX,{frame_id},{len(payload)},{fps:.2f},,\n")
+
+                print(f"[TX]  frame={frame_id:04d}  inst={inst:05d}  size={len(payload):7d}B  frags={n_frags:3d}  fps={fps:5.1f}")
+                self._frame_count += 1
+
+                # Pace to target FPS
+                await asyncio.sleep(1.0 / FPS)
+
+            # looping: replay the dataset again until the wall-clock budget is spent
+            if _loop_dur > 0 and (time.time() - _loop_t0) < _loop_dur:
                 continue
-            frame = cv2.resize(frame, (WIDTH, HEIGHT), interpolation=cv2.INTER_AREA)
-            frame = embed_qr(frame, frame_id, self._bitrate)
-            payload = encode_frame(frame, self._enc, pts)
-            pts += 1
-
-            send_time = time.perf_counter()
-            _vfr_f.write(f"{frame_id},{frame_id},,{time.time():.6f},{send_time:.6f},{pts},"
-                         f"{(frame_id * RTP_CLOCK) // FPS & 0xFFFFFFFF},{self._bitrate},{self._bitrate},{frame.nbytes}\n")
-            n_frags = self._send_frame_datagrams(frame_id, payload, send_time)
-            _rtp_f.flush()
-
-            now = time.perf_counter()
-            fps = 1.0 / max(now - previous_time, 1e-6)
-            previous_time = now
-
-            with open(FRAME_LOG, "a") as f:
-                f.write(f"{frame_id},{len(payload)},{n_frags},{now:.6f},{fps:.2f}\n")
-            with open(EVENT_LOG, "a") as f:
-                f.write(f"{now:.6f},TX,{frame_id},{len(payload)},{fps:.2f},,\n")
-
-            print(f"[TX]  frame={frame_id:04d}  size={len(payload):7d}B  frags={n_frags:3d}  fps={fps:5.1f}")
-            self._frame_count += 1
-
-            # Pace to target FPS
-            await asyncio.sleep(1.0 / FPS)
+            break
 
         duration = time.perf_counter() - self._session_start
         avg_fps = self._frame_count / max(duration, 1e-6)
@@ -292,8 +321,13 @@ async def main():
     configuration.load_cert_chain(CERT_FILE, KEY_FILE)
     configuration.alpn_protocols = ["cgroq"]
     configuration.max_datagram_frame_size = 65536   # enable QUIC DATAGRAM extension
+    # QUIC congestion control, selectable so RoQ can be compared across CCs (and against
+    # WebRTC/SCReAM). aioquic ships "reno" (NewReno, the default) and "cubic"; BBR is not
+    # available in aioquic. The sender governs the send rate, so this is what matters.
+    _cc = os.environ.get("CGREPLAY_QUIC_CC", "reno").strip().lower() or "reno"
+    configuration.congestion_control_algorithm = _cc
 
-    print(f"[RoQ] Server listening on {QUIC_HOST}:{QUIC_PORT}")
+    print(f"[RoQ] Server listening on {QUIC_HOST}:{QUIC_PORT}  QUIC-CC={_cc}")
     print(f"[RoQ] Game={GAME}  FPS={FPS}  stop_frame={STOP_FRAME}")
 
     await serve(

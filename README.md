@@ -63,16 +63,18 @@ CGReplaypp/
 | Component | Version | Notes |
 |-----------|---------|-------|
 | Linux | Ubuntu 20.04+ | Mininet runs on Linux only |
-| Python | 3.9+ | two interpreters used (see below) |
+| Python | 3.10+ | one uv-managed environment (see below) |
+| uv | recent | Python env/deps manager (`python3 -m pip install --user uv`) |
 | Mininet | 2.3+ | network emulation, needs root |
 | GStreamer | 1.16+ | UDP/RTP and SCReAM paths |
 | Node.js | 18+ | web dashboard frontend |
 | Rust + CMake | recent | building the SCReAM `gstscream` plugin |
 
-Two Python interpreters are used by design:
-
-- a **virtualenv** for the QUIC path and the tooling (`aioquic`, `PyAV`, `opencv`, `pandas`, `matplotlib`, `streamlit`)
-- the **system Python** for the GStreamer (UDP/RTP, SCReAM) paths and for Mininet, which expect the system GStreamer bindings
+One **uv-managed** environment runs everything (transports, merge, UI). `./setup.sh`
+creates `.venv` with `--system-site-packages`, so the apt GStreamer/`gi` and the
+GStreamer-enabled `opencv` come from the system, and `uv` pins the rest (`aioquic`, `PyAV`,
+`scikit-image`) plus the UI (`fastapi`, `uvicorn`, `streamlit`). Everything stays on
+numpy 1.x, which the GStreamer `opencv` (used to read frames) requires.
 
 ---
 
@@ -103,14 +105,17 @@ sudo apt-get install -y \
   python3-gi gir1.2-gstreamer-1.0
 ```
 
-### 4. Python virtualenv (QUIC + tooling)
+### 4. Python environment (uv)
+
+One environment for every transport, the merge and the UI:
 
 ```bash
-python3 -m venv ~/venv
-~/venv/bin/pip install \
-  aioquic av opencv-python numpy pandas \
-  matplotlib seaborn scikit-image PyYAML qrcode pyzbar streamlit
+python3 -m pip install --user uv     # if uv isn't installed
+./setup.sh                           # creates .venv (--system-site-packages) + installs deps
 ```
+
+`setup.sh` verifies the imports (incl. GStreamer-enabled opencv). Deps are pinned in
+`pyproject.toml`.
 
 ### 5. VMAF (static ffmpeg with libvmaf)
 

@@ -1,0 +1,32 @@
+[project]
+name = "cgreplaypp"
+version = "0.1.0"
+description = "CGReplay++ cloud-gaming transports (WebRTC/QUIC/RoQ/SCReAM) + per-frame dataset merge"
+requires-python = ">=3.10"
+
+# One uv environment for every transport and the merge. The .venv is created with
+# --system-site-packages, so the apt-provided, GStreamer-enabled packages come from the
+# system Python and uv only pins the few that aren't there:
+#   gi (PyGObject) + GStreamer, cv2 (opencv with GStreamer=YES), pandas, qrcode, pyzbar,
+#   yaml  ->  system
+#   aioquic, av, scikit-image  ->  uv (below)
+#
+# Everything stays on numpy 1.x: the GStreamer-enabled cv2 is only the apt build (numpy 1),
+# and cv2.VideoCapture(CAP_GSTREAMER) is how the WebRTC/SCReAM receivers read frames, so the
+# whole env is pinned to numpy<2 (scikit-image<0.22 and av<14 are the numpy-1 lines).
+#
+# Setup:
+#   uv venv --system-site-packages .venv
+#   uv pip install -p .venv/bin/python "numpy<2" aioquic "av<14" "scikit-image<0.22"
+dependencies = [
+    # transports + quality (numpy-1 line; cv2/gi/pandas/qrcode/pyzbar come from the system)
+    "numpy<2",
+    "aioquic==1.3.0",        # QUIC transport + RoQ datagrams
+    "av<14",                 # PyAV H.264/H.265 encode/decode
+    "scikit-image<0.22",     # SSIM in the merge
+    # demo UI (web dashboard ui/ + Streamlit tools/gui_app.py), so `uv run` serves both
+    "fastapi>=0.110.0",
+    "uvicorn[standard]>=0.29.0",
+    "streamlit",
+    "matplotlib",
+]

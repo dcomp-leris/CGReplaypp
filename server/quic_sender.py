@@ -191,44 +191,56 @@ class QUICSenderProtocol(QuicConnectionProtocol):
         frames = list_frames()
         previous_time = time.perf_counter()
         pts = 0
+        # CGREPLAY_LOOP_DURATION_S > 0: replay the dataset until that many wall-clock seconds
+        # elapse (the 120 s runs), breaking mid-pass so a long (9000-frame) set ends on time.
+        # 0 = single pass (unchanged). With the long set frame_id stays unique (no wrap).
+        _loop_dur = float(os.environ.get("CGREPLAY_LOOP_DURATION_S", 0) or 0)
+        _loop_t0 = time.time()
 
-        for path in frames:
-            frame_id = int(os.path.basename(path).split(".")[0])
-            if frame_id >= STOP_FRAME:
-                break
+        while True:
+            for path in frames:
+                if _loop_dur > 0 and (time.time() - _loop_t0) >= _loop_dur:
+                    break                       # wall-clock budget spent (mid-pass for long sets)
+                frame_id = int(os.path.basename(path).split(".")[0])
+                if frame_id >= STOP_FRAME and _loop_dur <= 0:   # stop at STOP_FRAME only when NOT looping
+                    break
 
-            # Read + preprocess
-            frame = cv2.imread(path)
-            if frame is None:
+                # Read + preprocess
+                frame = cv2.imread(path)
+                if frame is None:
+                    continue
+                frame = cv2.resize(frame, (WIDTH, HEIGHT), interpolation=cv2.INTER_AREA)
+                frame = embed_qr(frame, frame_id, self._bitrate)
+                payload = encode_frame(frame, self._enc, pts)
+                pts += 1
+
+                # Each frame on its own server-unidirectional stream
+                stream_id = self._quic.get_next_available_stream_id(is_unidirectional=True)
+
+                # Frame header: [4B frame_id][4B payload_size][8B send_timestamp]
+                send_time = time.perf_counter()
+                header = struct.pack(HEADER_FMT, frame_id, len(payload), send_time)
+                self._quic.send_stream_data(stream_id, header + payload, end_stream=True)
+                self.transmit()
+
+                now = time.perf_counter()
+                fps = 1.0 / max(now - previous_time, 1e-6)
+                previous_time = now
+
+                with open(FRAME_LOG, "a") as f:
+                    f.write(f"{frame_id},{len(payload)},{now:.6f},{fps:.2f}\n")
+                with open(EVENT_LOG, "a") as f:
+                    f.write(f"{now:.6f},TX,{frame_id},{len(payload)},{fps:.2f},,\n")
+
+                print(f"[TX]  frame={frame_id:04d}  size={len(payload):7d}B  stream={stream_id:3d}  fps={fps:5.1f}")
+                self._frame_count += 1
+
+                # Pace to target FPS
+                await asyncio.sleep(1.0 / FPS)
+
+            if _loop_dur > 0 and (time.time() - _loop_t0) < _loop_dur:
                 continue
-            frame = cv2.resize(frame, (WIDTH, HEIGHT), interpolation=cv2.INTER_AREA)
-            frame = embed_qr(frame, frame_id, self._bitrate)
-            payload = encode_frame(frame, self._enc, pts)
-            pts += 1
-
-            # Each frame on its own server-unidirectional stream
-            stream_id = self._quic.get_next_available_stream_id(is_unidirectional=True)
-
-            # Frame header: [4B frame_id][4B payload_size][8B send_timestamp]
-            send_time = time.perf_counter()
-            header = struct.pack(HEADER_FMT, frame_id, len(payload), send_time)
-            self._quic.send_stream_data(stream_id, header + payload, end_stream=True)
-            self.transmit()
-
-            now = time.perf_counter()
-            fps = 1.0 / max(now - previous_time, 1e-6)
-            previous_time = now
-
-            with open(FRAME_LOG, "a") as f:
-                f.write(f"{frame_id},{len(payload)},{now:.6f},{fps:.2f}\n")
-            with open(EVENT_LOG, "a") as f:
-                f.write(f"{now:.6f},TX,{frame_id},{len(payload)},{fps:.2f},,\n")
-
-            print(f"[TX]  frame={frame_id:04d}  size={len(payload):7d}B  stream={stream_id:3d}  fps={fps:5.1f}")
-            self._frame_count += 1
-
-            # Pace to target FPS
-            await asyncio.sleep(1.0 / FPS)
+            break
 
         duration = time.perf_counter() - self._session_start
         avg_fps = self._frame_count / max(duration, 1e-6)

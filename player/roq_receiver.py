@@ -79,6 +79,12 @@ HDR_SIZE  = RTP_SIZE + FRAG_SIZE        # 28 bytes
 # considered lost and dropped (small reordering window).
 REORDER_WINDOW = 3
 IDLE_TIMEOUT   = 5.0    # finish if no datagram arrives for this long (after 1+ frames)
+# CGREPLAY_LOOP_DURATION_S > 0: the server replays the dataset to a wall-clock budget
+# (120 s congestion runs). The receiver must then NOT stop at the last frame id, and must
+# tolerate longer silences (congestion stalls); it finishes when the budget is spent.
+_LOOP_DUR      = float(os.environ.get("CGREPLAY_LOOP_DURATION_S", 0) or 0)
+if _LOOP_DUR > 0:
+    IDLE_TIMEOUT = 40.0
 
 FRAME_LOG = os.path.join(LOG_DIR, "ply_roq_frame.csv")
 RATE_LOG  = os.path.join(LOG_DIR, "ratelog_roq.csv")
@@ -154,7 +160,7 @@ def read_qr(frame: np.ndarray) -> tuple[int, str | None]:
 # ---------------------------------------------------------------------------
 # Live display — same separate-process viewer used by the QUIC receiver.
 # ---------------------------------------------------------------------------
-SYS_PY      = "/usr/bin/python3"
+SYS_PY      = "/home/hugo/CGSynth/CGReplaypp/.venv/bin/python3"
 VIEWER_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "frame_viewer.py")
 STOP_FILE   = "/tmp/quic_viewer_stop"
 
@@ -213,6 +219,10 @@ class RoQReceiverProtocol(QuicConnectionProtocol):
         """Finish the session if the stream goes silent (e.g. last frame lost)."""
         while not self._done.is_set():
             await asyncio.sleep(1.0)
+            if _LOOP_DUR > 0 and (time.perf_counter() - self._session_start) > _LOOP_DUR + 25:
+                print(f"[RoQ] Loop budget {_LOOP_DUR:.0f}s elapsed — finishing.")
+                self._finish()
+                return
             if self._frame_count > 0 and (time.perf_counter() - self._last_rx) > IDLE_TIMEOUT:
                 print(f"[RoQ] Idle for {IDLE_TIMEOUT:.0f}s — finishing.")
                 self._finish()
@@ -283,8 +293,13 @@ class RoQReceiverProtocol(QuicConnectionProtocol):
         # Writing in place lets it read a half-written PNG (libpng "Read Error").
         # imencode fixes the format from the ".png" arg (not the filename), so
         # the temp name can be one the *.png glob won't match; rename atomically.
-        _final = os.path.join(RECV_DIR, f"{frame_id:04d}.png")
-        _tmp   = os.path.join(RECV_DIR, f".{frame_id:04d}.png.part")
+        # Name by the monotonic decode index, not frame_id: when looping, frame_id
+        # cycles 1..N and would overwrite earlier passes, leaving quality on only the
+        # last pass. The merge finds the file by the saved_png column (below), so a
+        # unique name per decoded frame gives quality across the whole run.
+        _name  = f"{self._frame_count + 1:06d}.png"
+        _final = os.path.join(RECV_DIR, _name)
+        _tmp   = os.path.join(RECV_DIR, f".{_name}.part")
         _ok, _buf = cv2.imencode(".png", frame)
         if _ok:
             with open(_tmp, "wb") as _fp:
@@ -329,7 +344,7 @@ class RoQReceiverProtocol(QuicConnectionProtocol):
 
         self._frame_counter += 1
 
-        if frame_id >= STOP_FRAME - 1:
+        if frame_id >= STOP_FRAME - 1 and _LOOP_DUR <= 0:   # stop at the last frame only when NOT looping
             self._finish()
 
     def _finish(self):

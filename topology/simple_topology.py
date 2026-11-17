@@ -53,7 +53,7 @@ PCAP_DEST   = os.path.join(PLAYER_DIR, "output.pcap")
 _REAL_USER = os.environ.get("SUDO_USER", "hugo")
 _USER_HOME = os.path.expanduser(f"~{_REAL_USER}")
 VENV     = os.path.join(_USER_HOME, "venv/bin/python3")  # QUIC: aioquic, PyAV, matplotlib
-SYS_PY  = "/usr/bin/python3"                              # RTP/SCReAM: gi, GStreamer OpenCV
+SYS_PY  = "/home/hugo/CGSynth/CGReplaypp/.venv/bin/python3"                              # RTP/SCReAM: gi, GStreamer OpenCV
 
 
 _CONFIG_PATH = os.path.normpath(os.path.join(_SCRIPT_DIR, "../config/config.yaml"))
